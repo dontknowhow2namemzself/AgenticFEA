@@ -1,0 +1,18 @@
+[
+  {
+    "role": "user",
+    "text": "Can you check a short steel cantilever for me?"
+  },
+  {
+    "role": "agent",
+    "text": "I still need the following before I can proceed:\n  - geometry: length L, height h, width b in mm (e.g. 100 x 10 x 10)\n  - fixed: which end is clamped\n  - load: magnitude in N, which end, and direction (e.g. 1000 N down at the free end)\nPlease provide them in a single reply: "
+  },
+  {
+    "role": "user",
+    "text": "20 mm long, 10x10 mm square section, fixed at one end, 1000 N pushing straight down at the free tip."
+  },
+  {
+    "role": "agent",
+    "text": "✓ Understood — assumed mesh elem_size = 2.0 mm [policy: smallest section dim / 5]; element order = 2, shape = hex [pipeline convention]…. Running the pipeline…"
+  }
+]

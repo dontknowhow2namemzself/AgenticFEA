@@ -1,0 +1,14 @@
+# Control-room aesthetic: dark, monospace, one amber accent.
+[theme]
+base = "dark"
+font = "monospace"
+primaryColor = "#e8a13a"
+backgroundColor = "#0a0e14"
+secondaryBackgroundColor = "#11161f"
+textColor = "#c9d1d9"
+
+[server]
+headless = true
+# Bind to loopback only: the app is reachable from THIS machine, not the LAN or
+# the public IP. Remove this line if you want same-WiFi devices to view it.
+address = "localhost"

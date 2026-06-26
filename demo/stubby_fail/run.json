@@ -1,0 +1,371 @@
+{
+  "run_id": "stubby_fail",
+  "description": "A steel cantilever beam 20 mm long, 10x10 mm square section, fixed at one end, with a 1000 N downward load at the free end.",
+  "status": "failed",
+  "verdict": "FAIL",
+  "stages": [
+    {
+      "id": "understand",
+      "label": "Understand",
+      "status": "pass",
+      "detail": "2.3s",
+      "actions": [
+        {
+          "text": "Parsed the natural-language request",
+          "data": "",
+          "status": "pass"
+        },
+        {
+          "text": "Completeness check \u2014 must-haves present",
+          "data": "geometry \u00b7 material \u00b7 fixed \u00b7 load",
+          "status": "pass"
+        },
+        {
+          "text": "Applied 4 disclosed defaults",
+          "data": "mesh elem_size = 2.0 mm [policy: smallest section dim / 5]; element order = 2, shape = hex [pipeline convention]",
+          "status": "pass"
+        }
+      ],
+      "data": {
+        "assumptions": [
+          "mesh elem_size = 2.0 mm [policy: smallest section dim / 5]",
+          "element order = 2, shape = hex [pipeline convention]",
+          "analysis = static, linear [default]",
+          "displacement tolerance = 0.05 [default]"
+        ]
+      },
+      "artifacts": [
+        {
+          "kind": "panel",
+          "title": "completed definition",
+          "text": "A STEEL cantilever beam, length L=20.0 mm, height h=10.0 mm (along z, the load direction), width b=10.0 mm (along y). Fixed at one end; a 1000.0 N load at free end acting downward. Mesh element size 2.0 mm, order 2, hex. Analysis: static, linear. Displacement tolerance 0.05."
+        },
+        {
+          "kind": "list",
+          "title": "assumptions applied",
+          "items": [
+            "mesh elem_size = 2.0 mm [policy: smallest section dim / 5]",
+            "element order = 2, shape = hex [pipeline convention]",
+            "analysis = static, linear [default]",
+            "displacement tolerance = 0.05 [default]"
+          ]
+        }
+      ],
+      "report": ""
+    },
+    {
+      "id": "parameterize",
+      "label": "Parameterize",
+      "status": "pass",
+      "detail": "valid",
+      "actions": [
+        {
+          "text": "LLM filled the set_params tool",
+          "data": "valid on attempt 1",
+          "status": "pass"
+        },
+        {
+          "text": "Material 'STEEL' \u2192 SI-mm library",
+          "data": "E=210000 \u00b7 \u03bd=0.3 \u00b7 \u03c1=7.85e-09",
+          "status": "pass"
+        },
+        {
+          "text": "Validated against schema (Pydantic)",
+          "data": "1 warning(s)",
+          "status": "pass"
+        }
+      ],
+      "data": {
+        "material": "STEEL",
+        "warnings": [
+          "L/max(h,b) = 2.0 < 5: beam theory is unreliable here; the analytical displacement reference may not apply"
+        ]
+      },
+      "artifacts": [
+        {
+          "kind": "code",
+          "title": "params.py (validated)",
+          "text": "PARAMS = {'analysis': {'type': 'static', 'nonlinear': False},\n 'geometry': {'type': 'cantilever_beam',\n              'cantilever_beam': {'L': 20.0, 'h': 10.0, 'b': 10.0}},\n 'material': {'name': 'STEEL', 'E': 210000.0, 'nu': 0.3, 'rho': 7.85e-09},\n 'bc': {'fixed': ['face_x_min'],\n        'loads': [{'face': 'face_x_max',\n                   'dir': [0.0, 0.0, -1.0],\n                   'magnitude': 1000.0}]},\n 'mesh': {'elem_size': 2.0, 'elem_order': 2, 'elem_shape': 'hex'},\n 'acceptance': {'tol_disp': 0.05}}"
+        }
+      ],
+      "report": ""
+    },
+    {
+      "id": "preprocess",
+      "label": "Pre-Process",
+      "status": "pass",
+      "detail": "250 elem",
+      "actions": [
+        {
+          "text": "Built box \u00b7 tagged 6 neutral faces",
+          "data": "face_x_min \u2026 face_z_max",
+          "status": "pass"
+        },
+        {
+          "text": "Meshed 250\u00d7C3D20R \u00b7 1416 nodes",
+          "data": "elem_size 2.0 mm",
+          "status": "pass"
+        },
+        {
+          "text": "Quality minSICN = 1.000",
+          "data": "no negative Jacobian",
+          "status": "pass"
+        },
+        {
+          "text": "BC mapped \u00b7 FIXED 96 \u00b7 LOAD 96",
+          "data": "load dir [0.0, 0.0, -1.0]",
+          "status": "pass"
+        },
+        {
+          "text": "Gmsh\u2192CalculiX C3D20 remap verified",
+          "data": "max midside dev 5.4e-15 mm",
+          "status": "pass"
+        },
+        {
+          "text": "Wrote beam.inp",
+          "data": "51 KB \u00b7 U/RF/S requested",
+          "status": "pass"
+        }
+      ],
+      "data": {
+        "nodes": 1416,
+        "elements": 250,
+        "type": "C3D20R",
+        "minSICN": 1.0,
+        "fixed_nodes": 96,
+        "load_nodes": 96
+      },
+      "artifacts": [
+        {
+          "kind": "image",
+          "title": "mesh",
+          "path": "demo/stubby_fail/mesh.png"
+        },
+        {
+          "kind": "code",
+          "title": "beam.inp (excerpt)",
+          "text": "** CalculiX input deck generated by build_inp.py (plan layer 3.4)\n** Unit system: SI-mm (length mm, force N, stress/E MPa, displacement mm)\n** Geometry: cantilever_beam  L=20.0 h=10.0 b=10.0 (mm)\n** Mesh: 250 x C3D20R   Nodes: 1416\n** Node ordering: Gmsh type 17 -> CalculiX C3D20, remap verified (max midside deviation 5.40e-15 mm)\n*NODE\n1, 0, -5, 5\n   ...\n*ELEMENT, TYPE=C3D20R, ELSET=BEAM_VOL\n251, 157, 9, 2, 36, 753, 269, 81, 511, 173, 13, 40, 174, 898, 305, 548,\n899, 897, 306, 90, 547\n   ...\n*MATERIAL, NAME=STEEL\n*ELASTIC\n210000, 0.3\n*SOLID SECTION, ELSET=BEAM_VOL, MATERIAL=STEEL\n*BOUNDARY\nFIXED, 1, 3\n*STEP\n*STATIC\n*CLOAD\n5, 3, -10.41666667\n6, 3, -10.41666667\n7, 3, -10.41666667\n8, 3, -10.41666667\n45, 3, -10.41666667"
+        }
+      ],
+      "report": ""
+    },
+    {
+      "id": "solve",
+      "label": "Solve",
+      "status": "pass",
+      "detail": "0.1s",
+      "actions": [
+        {
+          "text": "Ran CalculiX ccx",
+          "data": "OMP_NUM_THREADS=4 (M5 P-cores)",
+          "status": "pass"
+        },
+        {
+          "text": "Job finished \u00b7 no *ERROR",
+          "data": "exit 0",
+          "status": "pass"
+        },
+        {
+          "text": "Wrote beam.frd",
+          "data": "U \u00b7 RF \u00b7 S blocks",
+          "status": "pass"
+        }
+      ],
+      "data": {
+        "threads": 4,
+        "exit": 0,
+        "seconds": 0.1
+      },
+      "artifacts": [
+        {
+          "kind": "code",
+          "title": "ccx.log (tail)",
+          "text": "   materials:            1\n   constants per material and temperature:            2\n   temperature points per material:            1\n   plastic data points per material:            0\n\n   orientations:            0\n   amplitudes:            2\n   data points in all amplitudes:            2\n   print requests:            0\n   transformations:            0\n   property cards:            0\n\n\n STEP            1\n\n Static analysis was selected\n\n\n Job finished\n"
+        }
+      ],
+      "report": "\n************************************************************\n\nCalculiX Version 2.23, Copyright(C) 1998-2025 Guido Dhondt\nCalculiX comes with ABSOLUTELY NO WARRANTY. This is free\nsoftware, and you are welcome to redistribute it under\ncertain conditions, see gpl.htm\n\n************************************************************\n\nYou are using an executable made on Fri Apr 24 17:56:05 UTC 2026\n Decascading the MPC's\n\n Determining the structure of the matrix:\n Using up to 4 cpu(s) for setting up the structure of the matrix.\n number of equations\n 3960\n number of nonzero lower triangular matrix elements\n 266292\n\n Using up to 4 cpu(s) for the stress calculation.\n\n Using up to 4 cpu(s) for the symmetric stiffness/mass contributions.\n\n Factoring the system of equations using the symmetric spooles solver\n Using 1 cpu for spooles.\n\n Using up to 4 cpu(s) for the stress calculation.\n\n\n  The numbers below are estimated upper bounds\n\n  number of:\n\n   nodes:         1416\n   elements:          500\n   one-dimensional elements:            0\n   two-dimensional elements:            0\n   integration points per element:            8\n   degrees of freedom per node:            3\n   layers per element:            1\n\n   distributed facial loads:            0\n   distributed volumetric loads:            0\n   concentrated loads:           96\n   single point constraints:          288\n   multiple point constraints:            1\n   terms in all multiple point constraints:            1\n   tie constraints:            0\n   dependent nodes tied by cyclic constraints:            0\n   dependent nodes in pre-tension constraints:            0\n\n   sets:            3\n   terms in all sets:          692\n\n   materials:            1\n   constants per material and temperature:            2\n   temperature points per material:            1\n   plastic data points per material:            0\n\n   orientations:            0\n   amplitudes:            2\n   data points in all amplitudes:            2\n   print requests:            0\n   transformations:            0\n   property cards:            0\n\n\n STEP            1\n\n Static analysis was selected\n\n\n Job finished\n\n"
+    },
+    {
+      "id": "physics",
+      "label": "Physics",
+      "status": "pass",
+      "detail": "7/7",
+      "actions": [
+        {
+          "text": "numerical validity",
+          "data": "finite & non-empty: disp=1416 stress=1416 forc=1416 nodes",
+          "status": "pass",
+          "critical": true
+        },
+        {
+          "text": "displacement direction",
+          "data": "tip max|Uz|=0.0183 mm, range [-0.0183, -0.0175] mm, expected downward (Uz<0)",
+          "status": "pass",
+          "critical": true
+        },
+        {
+          "text": "force balance",
+          "data": "reaction=[ 1.96e-12 -2.18e-12  1.00e+03] applied=[    0.     0. -1000.] N, residual=0.000% (< 1%)",
+          "status": "pass",
+          "critical": true
+        },
+        {
+          "text": "strain energy positive",
+          "data": "U = 1/2 * F.u = 8.853 N.mm (> 0)",
+          "status": "pass",
+          "critical": true
+        },
+        {
+          "text": "moment balance",
+          "data": "|M_react|=20000.0, |M_applied|=20000.0 N.mm (~P*L=20000), residual=0.000% (< 2%)",
+          "status": "pass",
+          "critical": false
+        },
+        {
+          "text": "max stress location",
+          "data": "max vM=138.3 MPa at node 1 (x=0.00 mm, near fixed end)",
+          "status": "pass",
+          "critical": false
+        },
+        {
+          "text": "stress magnitude",
+          "data": "max vM=138.3 MPa vs nominal Mc/I=120.0 MPa (ratio 1.15; FEM max exceeds nominal at the singular corner)",
+          "status": "pass",
+          "critical": false
+        }
+      ],
+      "data": {
+        "passed": 7,
+        "total": 7
+      },
+      "artifacts": [],
+      "report": "Physics Validation Report (plan layer 5)\n================================================================\nsolver : CalculiX Version 2.23    frd: /Users/zhangwenjing/Desktop/AI/TuringCollege/capstone/out/beam.frd\nmodel  : cantilever_beam L=20.0 h=10.0 b=10.0 mm    applied load = [0.0, 0.0, -1000.0] N\nparsed : disp=1416  stress=1416  forc=1416 nodes\n----------------------------------------------------------------\nchecklist  ( * = Critical, vetoes on FAIL )\n[PASS   ]* numerical_validity       finite & non-empty: disp=1416 stress=1416 forc=1416 nodes\n[PASS   ]* displacement_direction   tip max|Uz|=0.0183 mm, range [-0.0183, -0.0175] mm, expected downward (Uz<0)\n[PASS   ]* force_balance            reaction=[ 1.96e-12 -2.18e-12  1.00e+03] applied=[    0.     0. -1000.] N, residual=0.000% (< 1%)\n[PASS   ]* strain_energy_positive   U = 1/2 * F.u = 8.853 N.mm (> 0)\n[PASS   ]  moment_balance           |M_react|=20000.0, |M_applied|=20000.0 N.mm (~P*L=20000), residual=0.000% (< 2%)\n[PASS   ]  max_stress_location      max vM=138.3 MPa at node 1 (x=0.00 mm, near fixed end)\n[PASS   ]  stress_magnitude         max vM=138.3 MPa vs nominal Mc/I=120.0 MPa (ratio 1.15; FEM max exceeds nominal at the singular corner)\n----------------------------------------------------------------\nVERDICT: PASS  (all Critical checks PASS) -> proceed to postprocess (layer 6)\n================================================================\n"
+    },
+    {
+      "id": "postprocess",
+      "label": "Post-Process",
+      "status": "pass",
+      "detail": "3 views",
+      "actions": [
+        {
+          "text": "ccx2paraview \u00b7 beam.frd \u2192 beam.vtu",
+          "data": "1416 points",
+          "status": "pass"
+        },
+        {
+          "text": "Extracted field maxima",
+          "data": "|U|_max = 0.0192 mm \u00b7 \u03c3_vM = 138.3 MPa",
+          "status": "pass"
+        },
+        {
+          "text": "Rendered von Mises X / Y / Z",
+          "data": "PyVista off-screen",
+          "status": "pass"
+        },
+        {
+          "text": "Lossless check vs frd",
+          "data": "max values match",
+          "status": "pass"
+        }
+      ],
+      "data": {
+        "max_disp": 0.01918905974660168,
+        "max_vm": 138.33675980327246,
+        "fields": [
+          "U",
+          "S",
+          "S_Mises",
+          "S_Principal",
+          "RF",
+          "ERROR",
+          "U_magnitude"
+        ]
+      },
+      "artifacts": [
+        {
+          "kind": "views",
+          "title": "\u03c3_vM field",
+          "views": {
+            "z": "demo/stubby_fail/stress_z.png",
+            "y": "demo/stubby_fail/stress_y.png",
+            "x": "demo/stubby_fail/stress_x.png",
+            "disp": "demo/stubby_fail/displacement.png"
+          }
+        }
+      ],
+      "report": ""
+    },
+    {
+      "id": "verify",
+      "label": "Verify",
+      "status": "fail",
+      "detail": "19.8759%",
+      "actions": [
+        {
+          "text": "RAG retrieved reference candidates",
+          "data": "ChromaDB \u00b7 kind=reference",
+          "status": "pass"
+        },
+        {
+          "text": "applies() gate \u2192 cantilever_tip_load_eb",
+          "data": "deterministic match",
+          "status": "pass"
+        },
+        {
+          "text": "Computed error (deterministic code)",
+          "data": "the LLM never invents the formula",
+          "status": "pass"
+        },
+        {
+          "text": "Judged: FAIL",
+          "data": "threshold \u2264 5.0%",
+          "status": "fail"
+        }
+      ],
+      "data": {
+        "delta_fem": 0.0182668,
+        "delta_ref": 0.015238095238095238,
+        "error_pct": 19.8759,
+        "tol_pct": 5.0,
+        "verdict": "FAIL",
+        "kb_ref": "cantilever_tip_load_eb",
+        "provenance": "RAG retrieval (k=3) then applies() gate -> 'cantilever_tip_load_eb' at rank 1 (score 0.891)",
+        "max_vm": 138.33675980327246
+      },
+      "artifacts": [
+        {
+          "kind": "judge",
+          "title": "displacement verdict",
+          "verify": {
+            "delta_fem": 0.0182668,
+            "delta_ref": 0.015238095238095238,
+            "error_pct": 19.8759,
+            "tol_pct": 5.0,
+            "verdict": "FAIL",
+            "kb_ref": "cantilever_tip_load_eb",
+            "provenance": "RAG retrieval (k=3) then applies() gate -> 'cantilever_tip_load_eb' at rank 1 (score 0.891)",
+            "max_vm": 138.33675980327246
+          }
+        }
+      ],
+      "report": "Numerical Verification Report (plan layer 7)\n================================================================\nproblem : cantilever_beam | static | linear elastic | L=20.0 h=10.0 b=10.0 mm\nfrd     : /Users/zhangwenjing/Desktop/AI/TuringCollege/capstone/out/beam.frd\n\nreference selection (RAG retrieval -> deterministic applies() gate):\n  RAG retrieval (k=3) then applies() gate -> 'cantilever_tip_load_eb' at rank 1 (score 0.891)\n  MATCHED -> standard cantilever, free-end transverse point load  [id: cantilever_tip_load_eb]\n    applies_to : cantilever_beam; one end fully fixed; free-end transverse point load; linear elastic; small strain\n    scope_note : small strain, linear elastic, slender beam L/h >> 1 (Euler-Bernoulli; transverse shear deformation neglected)\n    source     : Euler-Bernoulli beam theory: delta = P L^3 / (3 E I), I = b h^3 / 12\n    note       : this configuration has L/h = 2.0\n\nDISPLACEMENT  (auto-judged):\n  delta_fem = 0.01827 mm   (max |U . load_dir| over the free-end LOAD face)\n  delta_ref = 0.01524 mm   (P L^3 / 3EI; P=1000 N, L=20 mm, E=210000 MPa, I=833.33 mm^4)\n  rel error = 19.8759 %    tolerance = 5.0000 %\n  -> FAIL\n\nSTRESS  (NOT auto-judged -- recorded for human review):\n  max von Mises = 138.34 MPa\n  Stress exits auto-judgment in the MVP because:\n    1. fixed-end stress concentration diverges under mesh refinement (not the section value Mc/I)\n    2. free-end point-load application is an artificial numerical singularity\n    3. stress error is not a meaningful convergence quantity in this configuration\n  -> N/A. Judge stress visually from out/stress_x.png / stress_y.png / stress_z.png.\n\nmesh convergence study : not performed in the MVP (out of scope).\n----------------------------------------------------------------\nVERDICT: FAIL  (displacement outside tolerance) -> go to diagnostics (layer 8)\n================================================================\n"
+    }
+  ],
+  "diagnosis": {
+    "failure_summary": "Verification failed because the FEM tip displacement (0.01827 mm) differs from the Euler-Bernoulli reference (0.01524 mm) by 19.9%, exceeding the 5% tolerance, for a cantilever with very low slenderness L/h=2.",
+    "failure_class": "D_verification",
+    "root_cause": "Most likely the reference model is invalid for this geometry, not the FE solve. With L/h=2 the beam is too stubby for Euler-Bernoulli beam theory, which neglects transverse shear deformation and therefore underpredicts deflection. A 3D solid FE model will reasonably give a larger displacement than the EB formula in this regime.",
+    "confidence": "high",
+    "suggested_fix": "Do not judge this case against Euler-Bernoulli deflection. Either: (1) increase slenderness to about L/h >= 10 for EB-based verification, or (2) keep the geometry and compare against a Timoshenko beam solution or a validated 3D reference/convergence study. If keeping the current setup, update verification tolerance/reference accordingly.",
+    "recommended_next_action": "Rerun verification with a slender beam geometry (e.g. same section, much larger L) or switch the analytical comparator to Timoshenko theory for L/h=2, then repeat the displacement check.",
+    "auto_fix_possible": false,
+    "report": "================================================================\nHUMAN REVIEW REPORT (diagnostics, plan layer 8)\n================================================================\nfailed stage  : verification\nfailure class : D_verification\n\n1. Failure Summary:\n   Verification failed because the FEM tip displacement (0.01827 mm) differs from the Euler-Bernoulli reference (0.01524 mm) by 19.9%, exceeding the 5% tolerance, for a cantilever with very low slenderness L/h=2.\n2. Root Cause:\n   Most likely the reference model is invalid for this geometry, not the FE solve. With L/h=2 the beam is too stubby for Euler-Bernoulli beam theory, which neglects transverse shear deformation and therefore underpredicts deflection. A 3D solid FE model will reasonably give a larger displacement than the EB formula in this regime.\n3. Confidence: high\n4. Suggested Fix:\n   Do not judge this case against Euler-Bernoulli deflection. Either: (1) increase slenderness to about L/h >= 10 for EB-based verification, or (2) keep the geometry and compare against a Timoshenko beam solution or a validated 3D reference/convergence study. If keeping the current setup, update verification tolerance/reference accordingly.\n5. Recommended Next Action:\n   Rerun verification with a slender beam geometry (e.g. same section, much larger L) or switch the analytical comparator to Timoshenko theory for L/h=2, then repeat the displacement check.\n\n(auto_fix_possible = False -- informational only; nothing runs automatically)\n----------------------------------------------------------------\nDecision required: Approve (apply fix & rerun) / Reject (stop) / Modify (change params & rerun).\n================================================================\n"
+  },
+  "meta": {
+    "solver": "CalculiX ccx \u00b7 SPOOLES",
+    "units": "SI-mm",
+    "host": "M5 / 32GB arm64",
+    "n_elem": 250,
+    "n_nodes": 1416
+  }
+}

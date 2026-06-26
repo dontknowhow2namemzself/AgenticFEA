@@ -1,0 +1,22 @@
+# Agentic FEA Pipeline — Python dependencies (Python 3.12).
+#
+# NOTE: the CalculiX solver (ccx) is a SYSTEM/conda binary, NOT a pip package.
+# Create the env with the solver, then install these into it:
+#   mamba create -n fea -c conda-forge python=3.12 calculix
+#   conda activate fea
+#   pip install -r requirements.txt
+
+# LLM (semantics) + config
+openai==2.43.0            # OpenRouter via the OpenAI-compatible SDK (chat + embeddings)
+pydantic==2.13.4          # tool-call schema validation
+python-dotenv==1.2.2      # load OPENROUTER_API_KEY from .env
+
+# Geometry, solver I/O, post-processing (the deterministic numbers)
+gmsh==4.15.2              # structured C3D20R hex meshing
+ccx2paraview==3.2.0       # CalculiX .frd -> .vtu
+pyvista==0.48.4           # off-screen 3D rendering (mesh + stress/displacement)
+numpy==2.4.6              # numerics
+
+# Retrieval (RAG) + dashboard
+chromadb==1.5.9           # vector store for reference / knowledge retrieval
+streamlit==1.58.0         # control-room dashboard (live + DEMO replay)

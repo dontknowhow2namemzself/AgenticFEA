@@ -1,0 +1,21 @@
+# Secrets -- never commit the real key (only .env.example is tracked)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Generated FEA artifacts (regenerable via run_all.sh).
+# Remove this line if you want to track meshes / results / PNGs in git.
+out/
+# stray SPOOLES/CalculiX scratch file if ccx is ever run from the repo root
+spooles.out
+
+# Generated vector index (rebuilt from the knowledge base).
+knowledge/chroma/
