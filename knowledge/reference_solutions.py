@@ -4,7 +4,10 @@ Each case carries:
   - `embed_text`  : a plain-language description used for VECTOR RETRIEVAL (RAG);
   - `applies`     : a DETERMINISTIC predicate that decides whether the case is
                     actually valid for the given params;
-  - `formula`     : a code-callable that computes the reference value.
+  - `formula`     : a code-callable that computes the reference value;
+  - `quantity`    : WHAT that value is, so the verification layer knows which
+                    FEM measurement to compare it against (tip deflection for
+                    the beam cases, a stress-concentration factor for the plate).
 
 RAG (see vector_store.py) retrieves CANDIDATE cases by embed_text similarity;
 `applies` is the deterministic gate that decides which candidate is really used
@@ -12,13 +15,14 @@ RAG (see vector_store.py) retrieves CANDIDATE cases by embed_text similarity;
 makes the final call (exact, reads the real params). The LLM/embedding can never
 force a wrong formula to be used -- that is how RAG stays inside the iron law.
 
-Only the standard cantilever point-load case is reachable by today's pipeline
-(cantilever_beam + a single transverse point load). The others are retrieval
-DISTRACTORS + future extensions: their `applies` returns False for current
-point-load params, so the gate correctly rejects them.
+Two cases are reachable by today's pipeline: the standard cantilever point-load
+deflection, and the centered-hole plate SCF. The remaining beam cases are
+retrieval DISTRACTORS + future extensions: their `applies` returns False for
+current params, so the gate correctly rejects them.
 
 IRON LAW: formulas live ONLY here; the verification layer never invents one.
-Unit system: SI-mm (length mm, force N, E in MPa, displacement mm).
+Unit system: SI-mm (length mm, force N, E in MPa, displacement mm); stress
+concentration factors are dimensionless.
 """
 
 from __future__ import annotations
@@ -187,7 +191,96 @@ FIXED_FIXED_CENTER = ReferenceCase(
                 "Mid-span deflection P L^3 / 192 E I."),
 )
 
-KNOWLEDGE_BASE = [STANDARD_CANTILEVER, CANTILEVER_UDL, SIMPLY_SUPPORTED_CENTER, FIXED_FIXED_CENTER]
+# ----- finite-width plate with a central circular hole, uniaxial tension -----
+# Peterson's Chart 4.1 polynomial fit to Howland's series solution. Returns the
+# NET-section factor Ktn: sigma_max = Ktn * sigma_net, sigma_net = F/((b-2r)*t).
+# The net-section definition is what makes Ktn -> 2 as the hole fills the width
+# (and -> 3, the Kirsch infinite-plate value, as the hole becomes small).
+PLATE_HOLE_LAMBDA_MAX = 0.6      # validity limit of the polynomial fit (2r/b)
+PLATE_HOLE_CENTER_TOL = 0.02     # |xc - a/2| <= tol*a  -> "centered" for the fit
+PLATE_HOLE_END_CLEARANCE = 0.7   # hole must sit >= 0.7*b from the loaded ends
+
+
+def plate_hole_ktn(lam: float) -> float:
+    """Howland/Peterson net-section SCF for a central hole, uniaxial tension."""
+    return 3.00 - 3.14 * lam + 3.667 * lam ** 2 - 1.527 * lam ** 3
+
+
+def _plate_hole_scf_applies(params: dict) -> bool:
+    if params["geometry"]["type"] != "plate_with_hole":
+        return False
+    ana = params["analysis"]
+    if ana["type"] != "static" or ana.get("nonlinear", False):
+        return False
+    g = params["geometry"].get("plate_with_hole")
+    if not g:
+        return False
+    a, b, r = float(g["a"]), float(g["b"]), float(g["r"])
+    xc, yc = float(g["xc"]), float(g["yc"])
+
+    # 1. The fit is for a hole on the strip's centerline, midway along it.
+    if abs(xc - a / 2.0) > PLATE_HOLE_CENTER_TOL * a:
+        return False
+    if abs(yc - b / 2.0) > PLATE_HOLE_CENTER_TOL * b:
+        return False
+    # 2. Polynomial validity range.
+    if 2.0 * r / b > PLATE_HOLE_LAMBDA_MAX:
+        return False
+    # 3. Howland's strip is infinitely long: the hole must be far enough from
+    #    the loaded / supported ends for their disturbance to have died out.
+    if min(xc, a - xc) - r < PLATE_HOLE_END_CLEARANCE * b:
+        return False
+    # 4. A single uniaxial TENSION load along +x on the far edge, supported at
+    #    the near edge -- any other configuration is a different problem.
+    bc = params["bc"]
+    if len(bc["loads"]) != 1:
+        return False
+    ld = bc["loads"][0]
+    if ld["face"] != "edge_x_max":
+        return False
+    d = [float(c) for c in ld["dir"]]
+    if d[0] <= 0 or abs(d[1]) > 1e-9 or abs(d[2]) > 1e-9:
+        return False
+    fixed_faces = {f if isinstance(f, str) else f["face"] for f in bc["fixed"]}
+    if fixed_faces != {"edge_x_min"}:
+        return False
+    return True
+
+
+def _plate_hole_scf(params: dict) -> float:
+    g = params["geometry"]["plate_with_hole"]
+    return plate_hole_ktn(2.0 * float(g["r"]) / float(g["b"]))
+
+
+PLATE_HOLE_TENSION_SCF = ReferenceCase(
+    id="plate_central_hole_tension_scf",
+    name="finite-width plate with a central circular hole, uniaxial tension",
+    applies_to=("plate_with_hole; hole centered in a strip under uniaxial "
+                "tension; 2r/b <= 0.6; hole >= 0.7*b clear of the loaded ends; "
+                "linear elastic plane stress"),
+    applies=_plate_hole_scf_applies,
+    formula=_plate_hole_scf,
+    quantity="stress_concentration_factor_Ktn",
+    scope_note=("net-section SCF: sigma_max = Ktn * sigma_net with "
+                "sigma_net = F/((b-2r)*t); central hole only, 2r/b <= 0.6; "
+                "Howland's strip is infinitely long, so end effects must have "
+                "decayed at the hole; small strain, linear elastic plane stress"),
+    source=("Peterson's Stress Concentration Factors, 3rd ed. (Pilkey & Pilkey, "
+            "Wiley 2008), Ch. 4 'Holes', Chart 4.1: "
+            "Ktn = 3.00 - 3.14*lam + 3.667*lam^2 - 1.527*lam^3, lam = 2r/b -- "
+            "a fit to Howland (1930), Phil. Trans. R. Soc. A 229, 49-86; "
+            "lam -> 0 recovers the Kirsch (1898) infinite-plate value Kt = 3"),
+    expected_error=("fit itself ~1% for lam <= 0.6; a converged plane-stress FEA "
+                    "sits ~0.6-0.9% above the fit for lam = 0.4"),
+    embed_text=("Rectangular flat plate or strip of finite width with a circular "
+                "hole at its center, pulled in uniaxial tension along its length. "
+                "Linear elastic plane stress. Peak tangential stress at the hole "
+                "edge on the transverse diameter; stress concentration factor "
+                "relative to the net section through the hole."),
+)
+
+KNOWLEDGE_BASE = [STANDARD_CANTILEVER, CANTILEVER_UDL, SIMPLY_SUPPORTED_CENTER,
+                  FIXED_FIXED_CENTER, PLATE_HOLE_TENSION_SCF]
 _BY_ID = {c.id: c for c in KNOWLEDGE_BASE}
 
 

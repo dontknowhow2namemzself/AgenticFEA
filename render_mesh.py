@@ -2,13 +2,21 @@
 """Render the mesh straight from beam.inp to out/mesh.png for the dashboard's
 Pre-Process artifact.
 
-Reads the CalculiX deck (*NODE, *ELEMENT C3D20, *NSET FIXED/LOAD, *CLOAD) and
-rebuilds the elements as linear hexahedra -- the 8 corner nodes of each C3D20, which
-gives clean quad faces instead of the triangulated quadratic surface VTK would draw
-from beam.vtu. Boundary conditions come from the same deck: the FIXED face as a
-translucent wall, and the load as one arrow per loaded node (faithful to the nodal
-*CLOAD) with the resultant in the label. Isometric + parallel projection, fixed end
-to the left. PyVista off-screen -- same stack as postprocess.py, no extra dependency.
+Reads the CalculiX deck (*NODE, *ELEMENT, *NSET FIXED/LOAD, *BOUNDARY, *CLOAD)
+and rebuilds the elements from their CORNER nodes only, which gives clean
+straight-edged cells instead of the triangulated quadratic surface VTK would
+draw from beam.vtu. Boundary conditions come from the same deck, so the picture
+always shows what was actually solved.
+
+  3D decks (C3D20R)  : isometric hex view; the FIXED face as a translucent wall
+                       and one arrow per loaded node, fixed end to the left.
+  2D decks (CPS8R /   : top (x-y) view of the plate; roller symbols on the
+  CPS6, plate plan M9)  DOF-1 constrained edge, a distinct marker on the single
+                       anchor node, and load arrows along the loaded edge. This
+                       is the picture that shows the roller + anchor support
+                       model (plate plan D2) at a glance.
+
+PyVista off-screen -- same stack as postprocess.py, no extra dependency.
 """
 from __future__ import annotations
 
@@ -22,11 +30,33 @@ HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
 pv.OFF_SCREEN = True
 
+# CalculiX element type -> (nodes per element, corner count, VTK cell type).
+# Only corners are drawn, so the midside nodes are read and discarded.
+ELEM_KINDS = {
+    "C3D20": (20, 8, pv.CellType.HEXAHEDRON),
+    "C3D20R": (20, 8, pv.CellType.HEXAHEDRON),
+    "CPS8": (8, 4, pv.CellType.QUAD),
+    "CPS8R": (8, 4, pv.CellType.QUAD),
+    "CPS6": (6, 3, pv.CellType.TRIANGLE),
+}
+
 
 def parse_inp(path):
-    """Pull nodes, C3D20 connectivity, named node sets and nodal loads from a deck."""
-    nodes, etok, nsets, cload = {}, [], {}, []
-    etype, mode, cur = "C3D20", None, None
+    """Pull nodes, per-type element blocks, node sets, constraints and nodal
+    loads from a deck. Returns (nodes, blocks, nsets, cload, boundary) where
+    blocks is {elem_type: [[eid, n1, n2, ...], ...]}."""
+    nodes, nsets, cload, boundary = {}, {}, [], []
+    blocks: dict = {}
+    etok: list = []
+    etype, mode, cur = None, None, None
+
+    def flush():
+        """Slice the accumulated token stream of one *ELEMENT block."""
+        if etype and etok:
+            stride = ELEM_KINDS[etype][0] + 1        # eid + connectivity
+            blocks.setdefault(etype, []).extend(
+                etok[i:i + stride] for i in range(0, len(etok), stride))
+
     for line in Path(path).read_text().splitlines():
         s = line.strip()
         if not s or s.startswith("**"):
@@ -34,17 +64,23 @@ def parse_inp(path):
         if s.startswith("*"):
             kw = s.split(",")[0].strip().upper()
             up = s.upper()
+            if mode == "elem":
+                flush()
+                etok = []
             if kw == "*NODE":
                 mode = "node"
             elif kw == "*ELEMENT":
                 mode = "elem"
-                if "TYPE=" in up:
-                    etype = up.split("TYPE=")[1].split(",")[0].strip()
+                etype = up.split("TYPE=")[1].split(",")[0].strip() if "TYPE=" in up else None
+                if etype not in ELEM_KINDS:
+                    raise ValueError(f"unsupported element type {etype!r} in {path}")
             elif kw == "*NSET":
                 mode, cur = "nset", up.split("NSET=")[1].split(",")[0].strip()
                 nsets[cur] = []
             elif kw == "*CLOAD":
                 mode = "cload"
+            elif kw == "*BOUNDARY":
+                mode = "boundary"
             else:
                 mode = None
             continue
@@ -58,12 +94,110 @@ def parse_inp(path):
         elif mode == "cload":
             p = [t for t in s.split(",") if t.strip()]
             cload.append((int(p[0]), int(p[1]), float(p[2])))
-    elems = [etok[i:i + 21] for i in range(0, len(etok), 21)]   # eid + 20 nodes per C3D20
-    return nodes, elems, nsets, cload, etype
+        elif mode == "boundary":
+            p = [t for t in s.split(",") if t.strip()]
+            if len(p) >= 2 and p[0].lstrip("-").isdigit():
+                lo = int(p[1])
+                hi = int(p[2]) if len(p) > 2 else lo
+                boundary += [(int(p[0]), d) for d in range(lo, hi + 1)]
+    if mode == "elem":
+        flush()
+    return nodes, blocks, nsets, cload, boundary
+
+
+def _grid_from_blocks(nodes, blocks):
+    """Corner-only PyVista grid spanning every element block in the deck."""
+    ids = sorted(nodes)
+    idx = {n: i for i, n in enumerate(ids)}
+    pts = np.array([nodes[n] for n in ids], float)
+    cells, ctypes = [], []
+    for etype, elems in blocks.items():
+        _n_per, n_corner, vtk_type = ELEM_KINDS[etype]
+        for e in elems:
+            cells += [n_corner] + [idx[n] for n in e[1:1 + n_corner]]
+            ctypes.append(vtk_type)
+    return pv.UnstructuredGrid(np.array(cells, np.int64),
+                               np.array(ctypes, np.uint8), pts)
+
+
+def _render_plate(nodes, blocks, nsets, cload, boundary, png) -> Path:
+    """Top view of a 2D plate deck with its roller / anchor / load symbols."""
+    grid = _grid_from_blocks(nodes, blocks)
+    n_elem = sum(len(v) for v in blocks.values())
+    etype_txt = " + ".join(f"{len(v)}x{k}" for k, v in sorted(blocks.items()))
+    xmn, xmx, ymn, ymx = grid.bounds[0:4]
+    span = max(xmx - xmn, ymx - ymn)
+
+    # Canvas is deliberately taller than the part's 2:1 aspect: the plate fills
+    # the width and leaves dark bands top and bottom for the title and legend,
+    # so no text ends up sitting on the mesh.
+    pl = pv.Plotter(off_screen=True, window_size=(1200, 800))
+    pl.background_color = "#11161f"
+    pl.enable_parallel_projection()
+    pl.add_mesh(grid, color="#9fb2c8", show_edges=True, edge_color="#56708c", line_width=1)
+
+    # Constraints, split by DOF: DOF 1 == the roller edge, DOF 2 == the anchor.
+    # Legend entries are pixel-positioned text, not 3D point labels: a tight
+    # camera on a wide part clips anything placed outside the plate outline.
+    by_dof: dict = {}
+    for nid, dof in boundary:
+        by_dof.setdefault(dof, []).append(nid)
+    legend = []
+    roller = [n for n in by_dof.get(1, []) if n in nodes]
+    if roller:
+        pts = np.array([nodes[n] for n in roller])
+        pl.add_mesh(pv.PolyData(pts).glyph(geom=pv.Sphere(radius=span * 0.006),
+                                           scale=False, orient=False),
+                    color="#3fb1d0")
+        legend.append((f"ROLLER   u_x = 0  ({len(roller)} nodes)", "#3fb1d0"))
+    anchor = [n for n in by_dof.get(2, []) if n in nodes]
+    if anchor:
+        # Nudged just outside the edge: the anchor node is also a roller node,
+        # so drawn in place its marker would sit under the roller glyph.
+        pts = np.array([nodes[n] for n in anchor]) - np.array([span * 0.012, 0, 0])
+        pl.add_mesh(pv.PolyData(pts).glyph(geom=pv.Sphere(radius=span * 0.014),
+                                           scale=False, orient=False),
+                    color="#e05c5c")
+        legend.append((f"ANCHOR   u_y = 0  ({len(anchor)} node, mid-edge)", "#e05c5c"))
+    # Loads: one arrow per loaded node, tip landing on the node.
+    if cload:
+        fx: dict = {}
+        for nid, dof, val in cload:
+            if dof == 1:
+                fx[nid] = fx.get(nid, 0.0) + val
+        pts = np.array([nodes[n] for n in sorted(fx) if n in nodes])
+        if len(pts):
+            total = sum(fx.values())
+            d = np.array([1.0 if total > 0 else -1.0, 0.0, 0.0])
+            alen = span * 0.075
+            cloud = pv.PolyData(pts - d * alen)
+            cloud["v"] = np.tile(d, (len(pts), 1))
+            slim = pv.Arrow(tip_length=0.3, tip_radius=0.09, shaft_radius=0.028)
+            pl.add_mesh(cloud.glyph(orient="v", scale=False, factor=alen, geom=slim),
+                        color="#e8a13a")
+            legend.append((f"LOAD     {len(pts)} consistent nodal forces, "
+                           f"total {round(total)} N (+X)", "#e8a13a"))
+
+    pl.add_text(f"{etype_txt} plane stress · {n_elem} elem · SI-mm",
+                position=(14, 766), font_size=11, color="#8893a3")
+    for i, (text, colour) in enumerate(legend):
+        pl.add_text(text, position=(14, 22 + 24 * (len(legend) - 1 - i)),
+                    font_size=11, color=colour)
+    pl.view_xy()
+    # adjust_render_window=False: tight() otherwise RESIZES the canvas to the
+    # part's aspect ratio, which would swallow the bands reserved for the text.
+    pl.camera.tight(padding=0.10, adjust_render_window=False)
+    pl.screenshot(str(png))
+    pl.close()
+    return Path(png)
 
 
 def render_mesh(inp=OUT / "beam.inp", png=OUT / "mesh.png") -> Path:
-    nodes, elems, nsets, cload, etype = parse_inp(inp)
+    nodes, blocks, nsets, cload, boundary = parse_inp(inp)
+    if any(k.startswith("CPS") for k in blocks):
+        return _render_plate(nodes, blocks, nsets, cload, boundary, png)
+    etype = next(iter(blocks))
+    elems = blocks[etype]
     ids = sorted(nodes)
     idx = {n: i for i, n in enumerate(ids)}
     pts = np.array([nodes[n] for n in ids], float)

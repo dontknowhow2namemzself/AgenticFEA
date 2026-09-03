@@ -22,18 +22,34 @@ Unit system: SI-mm.
 from __future__ import annotations
 
 import sys
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-# Neutral geometry face labels (naming contract, plan section 0.2). BC references
-# must point at one of these; checked here so typos fail before meshing.
+# Neutral geometry boundary labels (naming contract, cantilever plan section 0.2
+# and plate plan section 0.2). BC references must point at a label belonging to
+# the ACTIVE geometry type; checked in the root model so cross-geometry typos
+# (e.g. a 3D face label on a 2D plate) fail before meshing.
 VALID_FACES = (
     "face_x_min", "face_x_max",
     "face_y_min", "face_y_max",
     "face_z_min", "face_z_max",
 )
-SUPPORTED_GEOMETRIES = ("cantilever_beam",)  # MVP scope; extend by adding a subset model
+PLATE_EDGE_LABELS = (
+    "edge_x_min", "edge_x_max",
+    "edge_y_min", "edge_y_max",
+    "hole_boundary",
+)
+BOUNDARY_LABELS = {
+    "cantilever_beam": VALID_FACES,       # 3D solid: boundary entities are faces
+    "plate_with_hole": PLATE_EDGE_LABELS, # 2D plane stress: boundary entities are edges
+}
+# Meshing strategies admissible per geometry (mesh.py enforces what is implemented).
+GEOMETRY_ELEM_SHAPES = {
+    "cantilever_beam": ("hex", "tet"),
+    "plate_with_hole": ("quad", "tri"),
+}
+SUPPORTED_GEOMETRIES = tuple(BOUNDARY_LABELS)  # extend by adding a subset model + label set
 
 # Plausible SI-mm magnitude bands. Out-of-band values are WARNINGS (not hard
 # limits): they flag a likely unit error for a human to judge, without blocking.
@@ -56,11 +72,46 @@ class CantileverBeamGeom(BaseModel):
     b: float = Field(gt=0)   # mm, width (y)
 
 
+class PlateWithHoleGeom(BaseModel):
+    """Rectangular plate with a circular hole, 2D plane stress (plate plan 0.1).
+
+    Plate occupies x in [0, a], y in [0, b] in the z = 0 plane (corner origin).
+    Hole center = (xc, yc) in the same corner-origin coordinates; the centered
+    Kirsch/Howland baseline is xc = a/2, yc = b/2.
+    """
+    model_config = ConfigDict(extra="forbid")
+    a: float = Field(gt=0)   # mm, plate length along x (load direction)
+    b: float = Field(gt=0)   # mm, plate width along y
+    t: float = Field(gt=0)   # mm, thickness (plane stress *SOLID SECTION)
+    r: float = Field(gt=0)   # mm, hole radius
+    xc: float = Field(gt=0)  # mm, hole-center x (corner origin; a/2 -> centered)
+    yc: float = Field(gt=0)  # mm, hole-center y (corner origin; b/2 -> centered)
+
+    def ligaments(self) -> dict:
+        """Material widths between the hole and each plate edge (mm)."""
+        return {
+            "x_min": self.xc - self.r, "x_max": self.a - self.xc - self.r,
+            "y_min": self.yc - self.r, "y_max": self.b - self.yc - self.r,
+        }
+
+    @model_validator(mode="after")
+    def _hole_strictly_inside(self):
+        lig = self.ligaments()
+        bad = {k: v for k, v in lig.items() if v <= 0.0}
+        if bad:
+            raise ValueError(
+                f"hole (r={self.r}, center ({self.xc}, {self.yc})) is not "
+                f"strictly inside the {self.a} x {self.b} plate; non-positive "
+                f"ligament(s): { {k: round(v, 6) for k, v in bad.items()} }"
+            )
+        return self
+
+
 class GeometryParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: str
     cantilever_beam: Optional[CantileverBeamGeom] = None
-    # Future: plate_with_hole: Optional[PlateWithHoleGeom] = None, etc.
+    plate_with_hole: Optional[PlateWithHoleGeom] = None
 
     @model_validator(mode="after")
     def _subset_present_and_supported(self):
@@ -84,16 +135,9 @@ class MaterialParams(BaseModel):
 
 class LoadSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    face: str
+    face: str                         # boundary entity label: a face (3D) or an edge (2D)
     dir: list[float]
     magnitude: float = Field(gt=0)    # N; sign of the load is carried by `dir`
-
-    @field_validator("face")
-    @classmethod
-    def _face_known(cls, v: str) -> str:
-        if v not in VALID_FACES:
-            raise ValueError(f"load face {v!r} not a valid label {list(VALID_FACES)}")
-        return v
 
     @field_validator("dir")
     @classmethod
@@ -105,30 +149,79 @@ class LoadSpec(BaseModel):
         return v
 
 
+class FixedSpec(BaseModel):
+    """DOF-level constraint on a boundary entity (plate plan 0.3).
+
+    `at="all"` constrains every node of the entity; `at="mid"` constrains only
+    the single node nearest the entity midpoint (a rigid-body anchor). The plain
+    string form in `BCParams.fixed` remains the full clamp of all translations.
+    """
+    model_config = ConfigDict(extra="forbid")
+    face: str
+    dofs: list[int] = Field(min_length=1)
+    at: Literal["all", "mid"] = "all"
+
+    @field_validator("dofs")
+    @classmethod
+    def _dofs_valid(cls, v: list) -> list:
+        bad = [d for d in v if d not in (1, 2, 3)]
+        if bad:
+            raise ValueError(f"dofs must be translations 1..3; got {bad}")
+        if len(set(v)) != len(v):
+            raise ValueError(f"duplicate dofs in {v}")
+        return v
+
+
+def fixed_entry_face(entry) -> str:
+    """Boundary label of a `bc.fixed` entry (str or FixedSpec/dict)."""
+    if isinstance(entry, str):
+        return entry
+    return entry["face"] if isinstance(entry, dict) else entry.face
+
+
+def fixed_entry_dofs(entry) -> tuple:
+    """Constrained DOFs of a `bc.fixed` entry (str form == full clamp 1-3)."""
+    if isinstance(entry, str):
+        return (1, 2, 3)
+    dofs = entry["dofs"] if isinstance(entry, dict) else entry.dofs
+    return tuple(int(d) for d in dofs)
+
+
+def fixed_entry_at(entry) -> str:
+    """Node-selection mode of a `bc.fixed` entry: "all" or "mid" (str form == "all")."""
+    if isinstance(entry, str):
+        return "all"
+    at = entry.get("at", "all") if isinstance(entry, dict) else entry.at
+    return str(at)
+
+
 class BCParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    fixed: list[str] = Field(min_length=1)
+    # str  -> full clamp of all translational DOFs on that entity (MVP form)
+    # dict -> DOF-level constraint (FixedSpec), used by the plate roller + anchor
+    fixed: list[Union[str, FixedSpec]] = Field(min_length=1)
     loads: list[LoadSpec] = Field(min_length=1)
-
-    @field_validator("fixed")
-    @classmethod
-    def _fixed_faces_known(cls, v: list) -> list:
-        bad = [f for f in v if f not in VALID_FACES]
-        if bad:
-            raise ValueError(f"fixed faces {bad} not valid labels {list(VALID_FACES)}")
-        return v
 
 
 class MeshParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
     elem_size: float = Field(gt=0)        # mm, target edge length
     elem_order: Literal[1, 2] = 2
-    elem_shape: Literal["hex", "tet"] = "hex"   # "tet" reserved (mesh.py raises for now)
+    # hex/tet are 3D strategies (cantilever), quad/tri are 2D (plate); the
+    # geometry cross-check lives in the root model. mesh.py enforces which
+    # strategies are actually implemented.
+    elem_shape: Literal["hex", "tet", "quad", "tri"] = "hex"
 
 
 class AcceptanceParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tol_disp: float = Field(gt=0, le=1)   # fractional displacement tolerance (0.05 == 5%)
+    # Stress-concentration-factor tolerance, used ONLY by geometries whose stress
+    # field is smooth and reference-backed (plate_with_hole vs the Howland fit,
+    # plate plan D3/M7). The cantilever keeps stress out of auto-judgment.
+    # Default set from the M7 measurement across the sampling range (worst
+    # observed deviation 0.59%); see the provenance comment in params.py.
+    tol_scf: float = Field(default=0.03, gt=0, le=1)
 
 
 class Params(BaseModel):
@@ -140,6 +233,52 @@ class Params(BaseModel):
     bc: BCParams
     mesh: MeshParams
     acceptance: AcceptanceParams
+
+    @model_validator(mode="after")
+    def _bc_and_mesh_match_geometry(self):
+        gtype = self.geometry.type
+        labels = BOUNDARY_LABELS[gtype]
+
+        # Boundary labels must belong to the active geometry's label set.
+        referenced = ([fixed_entry_face(e) for e in self.bc.fixed]
+                      + [ld.face for ld in self.bc.loads])
+        bad = sorted({f for f in referenced if f not in labels})
+        if bad:
+            raise ValueError(
+                f"boundary label(s) {bad} not valid for geometry.type={gtype!r} "
+                f"(valid: {list(labels)})"
+            )
+
+        # Meshing strategy must match the geometry's dimensionality.
+        shapes = GEOMETRY_ELEM_SHAPES[gtype]
+        if self.mesh.elem_shape not in shapes:
+            raise ValueError(
+                f"mesh.elem_shape={self.mesh.elem_shape!r} not admissible for "
+                f"geometry.type={gtype!r} (admissible: {list(shapes)})"
+            )
+
+        if gtype == "plate_with_hole":
+            # 2D model in the x-y plane: loads may not have a z component.
+            for ld in self.bc.loads:
+                if abs(float(ld.dir[2])) > 1e-12:
+                    raise ValueError(
+                        f"plate_with_hole is 2D in the x-y plane; load dir {ld.dir} "
+                        f"must have a zero z component"
+                    )
+            # Necessary in-plane well-posedness: DOFs 1 and 2 must each be
+            # constrained somewhere (else a rigid-body mode; e.g. a roller with
+            # no y anchor). The full check incl. rotation needs node coordinates
+            # and lives in boundary_conditions.py (plate plan M3).
+            dof_union = set()
+            for e in self.bc.fixed:
+                dof_union.update(fixed_entry_dofs(e))
+            if not {1, 2} <= dof_union:
+                raise ValueError(
+                    f"plate constraints leave an in-plane rigid-body mode: constrained "
+                    f"DOF union {sorted(dof_union)} must include 1 and 2 (e.g. add an "
+                    f"anchor {{'face': 'edge_x_min', 'dofs': [2], 'at': 'mid'}})"
+                )
+        return self
 
 
 def _warnings(p: Params) -> list:
@@ -154,6 +293,32 @@ def _warnings(p: Params) -> list:
         elif slender < 10:
             warns.append(f"L/max(h,b) = {slender:.1f}: slenderness is borderline "
                          f"(shear deformation becomes non-negligible)")
+    if p.geometry.type == "plate_with_hole" and p.geometry.plate_with_hole is not None:
+        g = p.geometry.plate_with_hole
+        elem_size = p.mesh.elem_size
+        lam = 2.0 * g.r / g.b                      # net-section ratio d/W (load along x)
+        min_lig = min(g.ligaments().values())
+        if lam > 0.6:
+            warns.append(f"2r/b = {lam:.2f} > 0.6: outside the Howland-fit validity range; "
+                         f"the SCF auto-check will report N/A (recorded for human review)")
+        if min_lig < 0.1 * min(g.a, g.b):
+            warns.append(f"min ligament = {min_lig:.2f} mm < 10% of min(a, b): thin ligament, "
+                         f"expect steep gradients there")
+        if min_lig < 2.0 * elem_size:
+            warns.append(f"min ligament = {min_lig:.2f} mm < 2 x elem_size ({elem_size} mm): "
+                         f"the mesh cannot resolve the ligament; refine elem_size")
+        if elem_size > g.r / 3.0:
+            warns.append(f"elem_size = {elem_size} mm > r/3 ({g.r / 3.0:.2f} mm): hole "
+                         f"under-resolved globally (mesh layer refines locally per policy; "
+                         f"verify the hole element count in the mesh report)")
+        if g.t > 0.2 * min(g.a, g.b):
+            warns.append(f"t = {g.t} mm > 20% of min(a, b): plane-stress thin-plate "
+                         f"assumption is questionable for this thickness")
+        end_dist = min(g.xc, g.a - g.xc) - g.r
+        if end_dist < 0.7 * g.b:
+            warns.append(f"hole is close to the loaded/constrained ends "
+                         f"(min(xc, a-xc) - r = {end_dist:.1f} mm < 0.7*b): "
+                         f"end effects reach the hole; the Howland reference may not apply")
     if p.material.nu >= 0.49:
         warns.append(f"nu = {p.material.nu} is near 0.5 (near-incompressible): risk of element locking")
     E = p.material.E
@@ -175,32 +340,70 @@ def validate_params(d: dict) -> tuple:
     return p, _warnings(p)
 
 
-def _selftest() -> bool:
-    """Self-acceptance run (plan section 2): the real PARAMS must validate, and a
-    battery of malformed inputs must each be rejected."""
+def _run_reject_battery(base: dict, cases: dict) -> bool:
+    """Each mutation of `base` MUST be rejected by validation."""
     import copy
+    ok = True
+    for name, mutate in cases.items():
+        d = copy.deepcopy(base)
+        mutate(d)
+        try:
+            validate_params(d)
+            print(f"  [FAIL] NOT rejected: {name}")
+            ok = False
+        except ValidationError:
+            print(f"  [PASS] rejected: {name}")
+    return ok
 
-    from params import PARAMS
+
+def _run_warn_battery(base: dict, cases: dict) -> bool:
+    """Each mutation of `base` must validate but produce at least one WARNING."""
+    import copy
+    ok = True
+    for name, mutate in cases.items():
+        d = copy.deepcopy(base)
+        mutate(d)
+        try:
+            _, ws = validate_params(d)
+        except ValidationError:
+            print(f"  [FAIL] {name}: hard-rejected (expected a warning)")
+            ok = False
+            continue
+        if ws:
+            print(f"  [PASS] {name}: {ws[0]}")
+        else:
+            print(f"  [FAIL] {name}: produced no warning")
+            ok = False
+    return ok
+
+
+def _selftest() -> bool:
+    """Self-acceptance run (plan layer 2 + plate plan M1): every prepared case in
+    params.CASES must validate, and per-geometry batteries of malformed inputs
+    must each be rejected / suspect values must warn."""
+    from params import CASES
 
     print("=" * 64)
-    print("schema.py acceptance (plan layer 2)")
+    print("schema.py acceptance (plan layer 2 + plate plan M1)")
     print("=" * 64)
 
-    print("1) validate the current params.py PARAMS:")
-    try:
-        _, warns = validate_params(PARAMS)
-    except ValidationError as exc:
-        print("  [FAIL] PARAMS did not validate:")
-        print(exc)
-        return False
-    print("  [PASS] PARAMS validates against the schema")
-    for w in warns:
-        print(f"  [WARN] {w}")
-    if not warns:
-        print("  (no warnings)")
+    print("1) validate every prepared case in params.CASES:")
+    for cname, cparams in CASES.items():
+        try:
+            _, warns = validate_params(cparams)
+        except ValidationError as exc:
+            print(f"  [FAIL] case {cname!r} did not validate:")
+            print(exc)
+            return False
+        print(f"  [PASS] case {cname!r} validates against the schema")
+        for w in warns:
+            print(f"  [WARN] {w}")
 
-    print("2) malformed inputs (each MUST be rejected):")
-    cases = {
+    beam = CASES["cantilever_beam"]
+    plate = CASES["plate_with_hole"]
+
+    print("2) malformed cantilever inputs (each MUST be rejected):")
+    beam_reject = _run_reject_battery(beam, {
         "E <= 0": lambda d: d["material"].update(E=-1.0),
         "nu >= 0.5": lambda d: d["material"].update(nu=0.5),
         "nu <= 0": lambda d: d["material"].update(nu=0.0),
@@ -212,42 +415,61 @@ def _selftest() -> bool:
         "unknown slot (typo)": lambda d: d["mesh"].update(elem_sizee=1.0),
         "tol_disp > 1": lambda d: d["acceptance"].update(tol_disp=2.0),
         "bad elem_order": lambda d: d["mesh"].update(elem_order=3),
-    }
-    all_rejected = True
-    for name, mutate in cases.items():
-        d = copy.deepcopy(PARAMS)
-        mutate(d)
-        try:
-            validate_params(d)
-            print(f"  [FAIL] NOT rejected: {name}")
-            all_rejected = False
-        except ValidationError:
-            print(f"  [PASS] rejected: {name}")
+        "2D edge label on the 3D beam": lambda d: d["bc"].update(fixed=["edge_x_min"]),
+        "2D elem_shape on the 3D beam": lambda d: d["mesh"].update(elem_shape="quad"),
+    })
 
-    print("3) suspect-but-valid values must WARN (not reject) -- a human then decides:")
-    warn_cases = {
+    print("3) malformed plate inputs (each MUST be rejected):")
+    plate_reject = _run_reject_battery(plate, {
+        "hole crosses the x_max edge (xc too big)":
+            lambda d: d["geometry"]["plate_with_hole"].update(xc=190.0),
+        "hole crosses the y_max edge (yc too big)":
+            lambda d: d["geometry"]["plate_with_hole"].update(yc=90.0),
+        "hole crosses the x_min edge (xc too small)":
+            lambda d: d["geometry"]["plate_with_hole"].update(xc=15.0),
+        "hole radius r <= 0": lambda d: d["geometry"]["plate_with_hole"].update(r=0.0),
+        "thickness t <= 0": lambda d: d["geometry"]["plate_with_hole"].update(t=-1.0),
+        "unknown edge label":
+            lambda d: d["bc"]["fixed"].__setitem__(0, {"face": "edge_q_min", "dofs": [1]}),
+        "3D face label on the 2D plate": lambda d: d["bc"]["loads"][0].update(face="face_x_max"),
+        "invalid dof 4":
+            lambda d: d["bc"]["fixed"].__setitem__(0, {"face": "edge_x_min", "dofs": [4]}),
+        "empty dofs list":
+            lambda d: d["bc"]["fixed"].__setitem__(0, {"face": "edge_x_min", "dofs": []}),
+        "roller without a y anchor (rigid-body mode)":
+            lambda d: d["bc"].update(fixed=[{"face": "edge_x_min", "dofs": [1]}]),
+        "load dir out of plane (z component)":
+            lambda d: d["bc"]["loads"][0].update(dir=[0, 0, -1]),
+        "3D elem_shape on the 2D plate": lambda d: d["mesh"].update(elem_shape="hex"),
+        "typo slot in the plate subset":
+            lambda d: d["geometry"]["plate_with_hole"].update(radius=5.0),
+        "bad 'at' value":
+            lambda d: d["bc"]["fixed"].__setitem__(
+                0, {"face": "edge_x_min", "dofs": [1], "at": "corner"}),
+    })
+
+    print("4) suspect-but-valid values must WARN (not reject) -- a human then decides:")
+    print("  -- cantilever --")
+    beam_warn = _run_warn_battery(beam, {
         "rho as g/cm^3 (7.85)": lambda d: d["material"].update(rho=7.85),
         "E as GPa (210)": lambda d: d["material"].update(E=210.0),
         "stubby beam (L=20, L/h=2)": lambda d: d["geometry"]["cantilever_beam"].update(L=20.0),
-    }
-    all_warned = True
-    for name, mutate in warn_cases.items():
-        d = copy.deepcopy(PARAMS)
-        mutate(d)
-        try:
-            _, ws = validate_params(d)
-        except ValidationError:
-            print(f"  [FAIL] {name}: hard-rejected (expected a warning)")
-            all_warned = False
-            continue
-        if ws:
-            print(f"  [PASS] {name}: {ws[0]}")
-        else:
-            print(f"  [FAIL] {name}: produced no warning")
-            all_warned = False
+    })
+    print("  -- plate --")
+    plate_warn = _run_warn_battery(plate, {
+        "big hole 2r/b = 0.7 (outside Howland fit)":
+            lambda d: d["geometry"]["plate_with_hole"].update(r=35.0),
+        "thin ligament (yc=75 with r=20)":
+            lambda d: d["geometry"]["plate_with_hole"].update(yc=75.0),
+        "thick plate (t=30, plane stress questionable)":
+            lambda d: d["geometry"]["plate_with_hole"].update(t=30.0),
+        "coarse mesh vs hole (elem_size=10, r=10)":
+            lambda d: (d["geometry"]["plate_with_hole"].update(r=10.0),
+                       d["mesh"].update(elem_size=10.0)),
+    })
 
     print("-" * 64)
-    ok = all_rejected and all_warned
+    ok = beam_reject and plate_reject and beam_warn and plate_warn
     print(f"ACCEPTANCE: {'PASS' if ok else 'FAIL'}")
     print("=" * 64)
     return ok

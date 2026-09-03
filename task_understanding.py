@@ -53,6 +53,12 @@ class TaskAssessment(BaseModel):
     off_topic_reason: Optional[str] = None
     in_scope: bool = True
     scope_note: Optional[str] = None
+    # Which pipeline geometry the description is about, when it is recognisably
+    # one of them. This separates "the pipeline cannot model that" from "the
+    # pipeline models that, but this chat front end cannot set it up yet" --
+    # the plate is supported by every deterministic layer, only its
+    # natural-language entry is still missing (plate plan M13).
+    geometry_type: Optional[str] = None
     geometry_specified: bool = False
     L: Optional[float] = None
     h: Optional[float] = None
@@ -77,10 +83,17 @@ class TaskAssessment(BaseModel):
 SYSTEM_PROMPT = """You analyze a description of a structural FEA problem for a
 cantilever-beam pipeline and call report_understanding. Rules:
 
-- Decide is_fea_task: false for anything that is not a solid-mechanics / FEA beam
-  problem (greetings, chit-chat, unrelated questions). If false, give a short
-  off_topic_reason and leave the rest empty.
-- SUPPORTED SCOPE (MVP): exactly one cantilever beam with ONE end fully fixed
+- Decide is_fea_task: false only for things that are not solid-mechanics / FEA
+  problems at all (greetings, chit-chat, unrelated questions). If false, give a
+  short off_topic_reason and leave the rest empty.
+- Set geometry_type when the description is recognisably one of the pipeline's
+  geometries: "cantilever_beam" for a beam clamped at one end, or
+  "plate_with_hole" for a flat plate/sheet/strip with a circular hole in it
+  under tension. A plate with a hole IS a real FEA problem this pipeline
+  solves, so is_fea_task stays true for it; set in_scope=false with the
+  scope_note "plate_with_hole has no natural-language entry yet" and leave the
+  beam dimensions empty, because only the beam can be set up from chat today.
+- SUPPORTED SCOPE for THIS chat entry: exactly one cantilever beam with ONE end fully fixed
   (clamped) and a SINGLE TRANSVERSE POINT LOAD at the opposite FREE END. NOT
   supported: a load anywhere but the free end (e.g. mid-span / in the middle),
   more than one fixed end (both ends fixed / clamped-clamped / simply supported),
@@ -239,6 +252,13 @@ def run_task_understanding(description: str, auto: bool = False, max_rounds: int
     cur_desc = description
     for _round in range(max_rounds + 1):
         if not assessment.in_scope:
+            # A geometry the pipeline HAS is reported as such, with the way to
+            # run it -- claiming it is unsupported would be untrue.
+            if assessment.geometry_type and assessment.geometry_type != "cantilever_beam":
+                return {"status": "no_nl_entry", "geometry_type": assessment.geometry_type,
+                        "reason": (f"{assessment.geometry_type} is supported by the pipeline but "
+                                   f"not yet through natural-language entry"),
+                        "how_to_run": f"python pipeline_run.py --case {assessment.geometry_type}"}
             return {"status": "out_of_scope",
                     "reason": assessment.scope_note or "outside the supported scope"}
         gaps = must_have_gaps(assessment)

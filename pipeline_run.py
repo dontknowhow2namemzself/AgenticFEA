@@ -70,7 +70,16 @@ def _diagnose(stage: str, params: dict) -> dict:
 STAGE_ORDER = ["understand", "parameterize", "preprocess", "solve", "physics", "postprocess", "verify"]
 
 
-def run_pipeline(description: str, run_id: str = "run", warp: float = 5.0, emit=None) -> dict:
+def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit=None,
+                 params: dict = None) -> dict:
+    """Run the pipeline and return the dashboard's run record.
+
+    `params` skips layers 1-2 and runs the deterministic chain on a prepared
+    parameter set. Two callers need that seam: a geometry whose natural-language
+    front end is not taught yet (the plate -- see plate plan M13), and the batch
+    runner (M10), which samples parameters directly and must never spend an LLM
+    call per case.
+    """
     emit = emit or (lambda *a: None)   # emit(stage_id, phase) for live progress
     rec = {"run_id": run_id, "description": description, "status": "complete", "verdict": "—",
            "stages": [], "diagnosis": None,
@@ -88,6 +97,19 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = 5.0, emit=
                 pass
 
     emit("understand", "running")
+
+    # 0 -- prepared-parameter path: layers 1-2 are supplied, not inferred.
+    if params is not None:
+        gtype = params["geometry"]["type"]
+        for sid, label in (("understand", "Understand"), ("parameterize", "Parameterize")):
+            stage(id=sid, label=label, status="pass", detail="supplied",
+                  actions=[{"text": "Parameters supplied directly (no LLM call)",
+                            "data": f"prepared case: {gtype}", "status": "pass"}],
+                  data={"source": "prepared"},
+                  artifacts=[{"kind": "code", "title": "params (prepared)",
+                              "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False,
+                                                                   width=78)}] if sid == "parameterize" else [])
+        return _run_deterministic_chain(params, rec, stage, warp)
 
     # 1 -- task understanding
     t = time.time()
@@ -124,8 +146,57 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = 5.0, emit=
           artifacts=[{"kind": "code", "title": "params.py (validated)",
                       "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False, width=78)}])
 
+    return _run_deterministic_chain(params, rec, stage, warp)
+
+
+def _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes) -> tuple:
+    """Per-geometry wording + data for the Pre-Process stage card."""
+    elem_size = params["mesh"]["elem_size"]
+    if params["geometry"]["type"] == "plate_with_hole":
+        v = inp["verify"]
+        actions = [
+            {"text": "Cut rectangle − disk · tagged 5 neutral edges",
+             "data": "edge_x_min … hole_boundary", "status": "pass"},
+            {"text": f"Meshed {inp['elem_type']} · {n_nodes} nodes",
+             "data": f"elem_size {elem_size} mm · {msh['n_hole_segments']} segments around the hole",
+             "status": "pass"},
+            {"text": f"Quality minSICN = {msh['min_quality']:.3f}",
+             "data": f"area matches a·b−πr² to {msh['area_rel_err'] * 100:.3f}%", "status": "pass"},
+            {"text": f"BC mapped · {bc['fixed']['n_constraints']} (node,dof) · LOAD {bc['load']['n_nodes']}",
+             "data": "roller + mid-edge anchor · rigid-body modes eliminated", "status": "pass"},
+            {"text": "Gmsh→CalculiX 2D remap verified",
+             "data": (f"midside dev {v['max_chord_dev']:.1e} mm · hole arc {v['max_arc_dev']:.1e} mm · "
+                      f"all cells CCW"), "status": "pass"},
+            {"text": "Wrote beam.inp (consistent edge loads)",
+             "data": f"{inp['file_size'] // 1024} KB · thickness {inp['thickness']} mm · U/RF/S",
+             "status": "pass"},
+        ]
+        data = {"nodes": n_nodes, "elements": n_elem, "type": inp["elem_type"],
+                "minSICN": round(msh["min_quality"], 4),
+                "hole_segments": msh["n_hole_segments"],
+                "constraints": bc["fixed"]["n_constraints"], "load_nodes": bc["load"]["n_nodes"]}
+        return actions, data
+    actions = [
+        {"text": "Built box · tagged 6 neutral faces", "data": "face_x_min … face_z_max", "status": "pass"},
+        {"text": f"Meshed {n_elem}×C3D20R · {n_nodes} nodes", "data": f"elem_size {elem_size} mm", "status": "pass"},
+        {"text": f"Quality minSICN = {msh['min_quality']:.3f}", "data": "no negative Jacobian", "status": "pass"},
+        {"text": f"BC mapped · FIXED {bc['fixed']['n_nodes']} · LOAD {bc['load']['n_nodes']}",
+         "data": f"load dir {bc['load']['loads'][0]['dir_unit']}", "status": "pass"},
+        {"text": "Gmsh→CalculiX C3D20 remap verified",
+         "data": f"max midside dev {inp['max_midside_dev']:.1e} mm", "status": "pass"},
+        {"text": "Wrote beam.inp", "data": f"{inp['file_size'] // 1024} KB · U/RF/S requested", "status": "pass"},
+    ]
+    data = {"nodes": n_nodes, "elements": n_elem, "type": "C3D20R",
+            "minSICN": round(msh["min_quality"], 4),
+            "fixed_nodes": bc["fixed"]["n_nodes"], "load_nodes": bc["load"]["n_nodes"]}
+    return actions, data
+
+
+def _run_deterministic_chain(params: dict, rec: dict, stage, warp) -> dict:
+    """Layers 3-7: pre-process -> solve -> physics -> post -> verify."""
+    is_plate = params["geometry"]["type"] == "plate_with_hole"
+
     # 3 -- pre-processing (mesh + BC + inp)
-    t = time.time()
     msh = mesh.build_mesh(params); bc = build_bc(params); inp = build_inp.build_inp(params)
     n_elem, n_nodes = inp["n_elems"], inp["n_nodes"]
     rec["meta"]["n_elem"], rec["meta"]["n_nodes"] = n_elem, n_nodes
@@ -133,16 +204,9 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = 5.0, emit=
         render_mesh.render_mesh()        # beam.inp now exists -> mesh.png (decoupled from solve)
     except Exception:  # noqa: BLE001
         pass
+    pre_actions, pre_data = _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes)
     stage(id="preprocess", label="Pre-Process", status="pass", detail=f"{n_elem} elem",
-          actions=[{"text": "Built box · tagged 6 neutral faces", "data": "face_x_min … face_z_max", "status": "pass"},
-                   {"text": f"Meshed {n_elem}×C3D20R · {n_nodes} nodes", "data": f"elem_size {params['mesh']['elem_size']} mm", "status": "pass"},
-                   {"text": f"Quality minSICN = {msh['min_quality']:.3f}", "data": "no negative Jacobian", "status": "pass"},
-                   {"text": f"BC mapped · FIXED {bc['fixed']['n_nodes']} · LOAD {bc['load']['n_nodes']}",
-                    "data": f"load dir {bc['load']['loads'][0]['dir_unit']}", "status": "pass"},
-                   {"text": "Gmsh→CalculiX C3D20 remap verified", "data": f"max midside dev {inp['max_midside_dev']:.1e} mm", "status": "pass"},
-                   {"text": "Wrote beam.inp", "data": f"{inp['file_size'] // 1024} KB · U/RF/S requested", "status": "pass"}],
-          data={"nodes": n_nodes, "elements": n_elem, "type": "C3D20R", "minSICN": round(msh["min_quality"], 4),
-                "fixed_nodes": bc["fixed"]["n_nodes"], "load_nodes": bc["load"]["n_nodes"]},
+          actions=pre_actions, data=pre_data,
           artifacts=[{"kind": "image", "title": "mesh", "path": str(OUT / "mesh.png")},
                      {"kind": "code", "title": "beam.inp (excerpt)", "text": _inp_excerpt()}])
 
@@ -182,37 +246,68 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = 5.0, emit=
         return rec
 
     # 6 -- post-processing
-    post = postprocess.run_postprocess(warp_factor=warp)
-    stage(id="postprocess", label="Post-Process", status="pass", detail="3 views",
+    post = postprocess.run_postprocess(warp_factor=warp, params=params)
+    if is_plate:
+        views = {"vM": str(OUT / "stress_vm.png"), "σxx": str(OUT / "stress_xx.png"),
+                 "σyy": str(OUT / "stress_yy.png"), "σxy": str(OUT / "stress_xy.png"),
+                 "disp": str(OUT / "displacement.png")}
+        render_note = ("Rendered σxx / σyy / σxy / vM (top view)",
+                       f"diverging scale about zero · warp ×{post['warp_factor']:.0f} auto")
+        detail = "5 fields"
+    else:
+        views = {"z": str(OUT / "stress_z.png"), "y": str(OUT / "stress_y.png"),
+                 "x": str(OUT / "stress_x.png"), "disp": str(OUT / "displacement.png")}
+        render_note = ("Rendered von Mises X / Y / Z", "PyVista off-screen")
+        detail = "3 views"
+    stage(id="postprocess", label="Post-Process", status="pass", detail=detail,
           actions=[{"text": "ccx2paraview · beam.frd → beam.vtu", "data": f"{post['n_points']} points", "status": "pass"},
                    {"text": "Extracted field maxima",
                     "data": f"|U|_max = {post['max_disp']:.4f} mm · σ_vM = {post['max_vm']:.1f} MPa", "status": "pass"},
-                   {"text": "Rendered von Mises X / Y / Z", "data": "PyVista off-screen", "status": "pass"},
+                   {"text": render_note[0], "data": render_note[1], "status": "pass"},
                    {"text": "Lossless check vs frd", "data": "max values match", "status": "pass"}],
           data={"max_disp": post["max_disp"], "max_vm": post["max_vm"], "fields": post["fields"]},
-          artifacts=[{"kind": "views", "title": "σ_vM field",
-                      "views": {"z": str(OUT / "stress_z.png"), "y": str(OUT / "stress_y.png"),
-                                "x": str(OUT / "stress_x.png"), "disp": str(OUT / "displacement.png")}}])
+          artifacts=[{"kind": "views", "title": "field renders", "views": views}])
 
-    # 7 -- numerical verification
-    vok, disp, stress, meta = verification.run_verification(params)
-    verify_text = verification._format_report(vok, disp, stress, meta)
+    # 7 -- numerical verification. Which quantity is judged depends on the
+    # geometry (plate plan D3): the beam judges displacement, the plate judges
+    # the stress concentration factor.
+    vok, judged, recorded, meta = verification.run_verification(params)
+    verify_text = verification._format_report(vok, judged, recorded, meta)
     (OUT / "verification_report.txt").write_text(verify_text)   # fresh report for diagnosis + expander
-    verdict = disp["status"]; rec["verdict"] = verdict
-    kb = disp["case"].id if disp.get("case") else None
-    vdata = {"delta_fem": disp.get("delta_fem"), "delta_ref": disp.get("delta_ref"),
-             "error_pct": round(disp["error"] * 100, 4) if disp.get("error") is not None else None,
-             "tol_pct": round(disp.get("tol", 0.05) * 100, 2), "verdict": verdict, "kb_ref": kb,
-             "provenance": disp.get("provenance"), "max_vm": stress["max_vm"]}
+    verdict = judged["status"]; rec["verdict"] = verdict
+    kb = judged["case"].id if judged.get("case") else None
+    if is_plate:
+        vdata = {"quantity": "Kt (stress concentration factor)",
+                 "fem": judged.get("kt_fem"), "ref": judged.get("kt_ref"),
+                 "max_vm": recorded["max_vm_global"],
+                 "elongation": recorded["mean_elongation"]}
+        judge_title = "stress-concentration verdict"
+        default_tol = 0.03
+    else:
+        vdata = {"quantity": "tip deflection [mm]",
+                 "fem": judged.get("delta_fem"), "ref": judged.get("delta_ref"),
+                 "max_vm": recorded["max_vm"]}
+        judge_title = "displacement verdict"
+        default_tol = 0.05
+    # delta_fem / delta_ref stay in the record: the dashboard's judge widget and
+    # the recorded demo snapshots read those keys.
+    vdata.update({
+        "delta_fem": judged.get("delta_fem"), "delta_ref": judged.get("delta_ref"),
+        "error_pct": round(judged["error"] * 100, 4) if judged.get("error") is not None else None,
+        "tol_pct": round(judged.get("tol", default_tol) * 100, 2), "verdict": verdict,
+        "kb_ref": kb, "provenance": judged.get("provenance")})
     stage(id="verify", label="Verify", status="pass" if verdict in ("PASS", "N/A") else "fail",
           detail=f'{vdata["error_pct"]}%' if vdata["error_pct"] is not None else verdict,
           actions=[{"text": "RAG retrieved reference candidates", "data": "ChromaDB · kind=reference", "status": "pass"},
-                   {"text": f"applies() gate → {kb}", "data": "deterministic match", "status": "pass"},
+                   {"text": f"applies() gate → {kb or 'no applicable reference'}",
+                    "data": "deterministic match" if kb else "verdict N/A, nothing fabricated",
+                    "status": "pass"},
                    {"text": "Computed error (deterministic code)", "data": "the LLM never invents the formula", "status": "pass"},
-                   {"text": f"Judged: {verdict}", "data": f'threshold ≤ {vdata["tol_pct"]}%',
+                   {"text": f"Judged {vdata['quantity']}: {verdict}",
+                    "data": f'threshold ≤ {vdata["tol_pct"]}%',
                     "status": verdict.lower() if verdict != "N/A" else "pass"}],
           data=vdata,
-          artifacts=[{"kind": "judge", "title": "displacement verdict", "verify": vdata}],
+          artifacts=[{"kind": "judge", "title": judge_title, "verify": vdata}],
           report=verify_text)
     if verdict == "FAIL":
         rec["status"] = "failed"
@@ -233,10 +328,20 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=None, help="write the run-record JSON to this path (for the dashboard)")
     ap.add_argument("--run-id", default="live")
     ap.add_argument("--stream", action="store_true", help="print '@@ <stage> <phase>' progress markers")
+    ap.add_argument("--case", default=None,
+                    help="run a prepared case from params.CASES (skips the LLM layers), "
+                         "e.g. --case plate_with_hole")
     args = ap.parse_args()
 
+    prepared = None
+    if args.case:
+        from params import CASES
+        if args.case not in CASES:
+            ap.error(f"unknown case {args.case!r}; available: {list(CASES)}")
+        prepared = CASES[args.case]
+
     emit = (lambda sid, ph: print(f"@@ {sid} {ph}", flush=True)) if args.stream else None
-    r = run_pipeline(args.description, run_id=args.run_id, emit=emit)
+    r = run_pipeline(args.description, run_id=args.run_id, emit=emit, params=prepared)
     if args.out:
         Path(args.out).write_text(json.dumps(r, default=str))
         print(f"wrote {args.out}  (status={r['status']} verdict={r['verdict']})")

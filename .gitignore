@@ -19,3 +19,14 @@ spooles.out
 
 # Generated vector index (rebuilt from the knowledge base).
 knowledge/chroma/
+
+# Personal design/working notes (Chinese). The reasoning that a reader needs is
+# in the README and in the code comments that carry each measured threshold;
+# these are the working documents behind them and stay local.
+cantilever_mvp_plan.md
+plate_with_hole_plan.md
+
+# Trained model weights: 30 MB of binary that git would carry forever, and the
+# training run is reproducible (fixed seed, ~25 min). The evidence that matters
+# -- per_case.csv / summary.csv / history.json -- IS tracked.
+surrogate/runs/**/*.pt

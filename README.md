@@ -1,4 +1,4 @@
-# Agentic FEA Pipeline — LLM‑driven cantilever‑beam analysis
+# Agentic FEA Pipeline — LLM‑driven structural analysis
 
 Turn a plain‑English sentence into a **verified** finite‑element analysis — without ever letting the language model invent an engineering number.
 
@@ -10,7 +10,17 @@ Turn a plain‑English sentence into a **verified** finite‑element analysis �
 
 ## What this project is (goal · problem · how it works)
 
-This project is an **agentic pipeline that turns a natural‑language description of a cantilever‑beam problem into a verified finite‑element analysis (FEA)**. The problem it solves: setting up FEA is expert‑heavy and error‑prone, and while a Large Language Model can lower that barrier, an LLM **cannot be trusted to produce engineering numbers** — a plausible‑but‑wrong stress or deflection is dangerous if believed. The pipeline resolves this by drawing a hard line: the **LLM handles only semantics** (understanding the request, filling parameter slots, selecting a reference solution, explaining failures), while **deterministic code and an analytical reference guarantee every number** (mesh, solve, physics checks, error‑vs‑theory, units). One English sentence flows through **eight layers** — task understanding → parameterization → pre‑processing → CalculiX solve → physics validation → post‑processing → numerical verification → diagnostics — and out come stress/displacement plots, validation reports, and a tip‑deflection checked against Euler–Bernoulli beam theory to **within ~0.06 %**.
+This project is an **agentic pipeline that turns a natural‑language description of a structural problem into a verified finite‑element analysis (FEA)**. The problem it solves: setting up FEA is expert‑heavy and error‑prone, and while a Large Language Model can lower that barrier, an LLM **cannot be trusted to produce engineering numbers** — a plausible‑but‑wrong stress or deflection is dangerous if believed. The pipeline resolves this by drawing a hard line: the **LLM handles only semantics** (understanding the request, filling parameter slots, selecting a reference solution, explaining failures), while **deterministic code and an analytical reference guarantee every number** (mesh, solve, physics checks, error‑vs‑theory, units). One English sentence flows through **eight layers** — task understanding → parameterization → pre‑processing → CalculiX solve → physics validation → post‑processing → numerical verification → diagnostics — and out come stress/displacement plots, validation reports, and a result checked against a textbook reference solution.
+
+Two geometries are supported, and they exercise the architecture in **opposite** ways:
+
+| | **cantilever beam** (3D solid) | **plate with a hole** (2D plane stress) |
+|---|---|---|
+| Elements | C3D20R structured hex | CPS8R / CPS6, refined at the hole |
+| Auto‑judged quantity | **tip deflection** vs `PL³/3EI` → **0.056 %** | **stress concentration factor** vs Howland/Peterson → **0.29 %** |
+| Recorded but *not* judged | stress (the fixed‑end peak **diverges** under mesh refinement — there is no converged value to compare) | displacement (a perforated plate's elongation has **no closed form**) |
+
+That inversion is the point: each geometry is judged on the quantity its own physics actually makes judgeable, and the system says **N/A** for the other rather than inventing a verdict.
 
 ---
 
@@ -121,11 +131,31 @@ python parameterize.py --write \
 # (optional) layer‑1 understanding with clarifying questions / off‑topic guard:
 python task_understanding.py --parameterize "an aluminium cantilever, 100mm, 10x10, 1kN at the tip"
 
+# Pick the geometry: params.py -> ACTIVE_CASE = "cantilever_beam" | "plate_with_hole"
 # Deterministic chain: mesh → solve → physics → postprocess → verify (diagnostics on failure)
 bash run_all.sh --skip-checkpoints
 ```
 
-Outputs land in `out/`: `beam.{msh,inp,frd,vtu}`, `stress_{x,y,z}.png`, `displacement.png`, `physics_report.txt`, `verification_report.txt`, and `diagnostic_report.txt` on failure.
+Outputs land in `out/`: `beam.{msh,inp,frd,vtu}`, the render set for the active geometry (`stress_{x,y,z}.png` for the beam, `stress_{xx,yy,xy,vm}.png` for the plate), `displacement.png`, `physics_report.txt`, `verification_report.txt`, and `diagnostic_report.txt` on failure.
+
+The plate can also be driven through the same in‑process orchestrator the dashboard uses, which skips the two LLM layers and runs the deterministic chain on prepared parameters — the seam the batch runner will use too:
+
+```bash
+python pipeline_run.py --case plate_with_hole
+```
+
+### Regenerating the surrogate dataset
+
+The 545‑case dataset (~540 MB of tensors) is **not** in the repository; it is regenerated from a fixed seed, which is why the sampling and meshing were made deterministic in the first place. Roughly 5 minutes:
+
+```bash
+python batch_run.py -n 500 --anchors 5 --seed 42 --root out/dataset --export --no-keep-raw
+python batch_run.py -n 40 --anchors 0 --seed 2026 --root out/dataset_ood_aspect --plate 150x100 --export --no-keep-raw
+python surrogate/train.py --epochs 120 --tag baseline     # ~25 min on Apple silicon (MPS)
+python surrogate/evaluate.py --tag baseline
+```
+
+The `--anchors` cases are deliberately centred holes: they are the only configurations an analytical reference applies to, so they act as **control samples** that audit the whole batch against Howland's solution (5/5 within 0.93 % on the run reported here). Model weights are gitignored — `surrogate/runs/baseline/per_case.csv` carries the per‑case results that back the table above.
 
 ### Dashboard (Streamlit)
 
@@ -150,6 +180,41 @@ A dark "control‑room" UI. A clarification chat resolves the request (asks for 
 
 *(Figures are the committed DEMO snapshots in `demo/cantilever_pass/`; live runs regenerate them into `out/`.)*
 
+### Plate with a hole — 2D plane stress
+
+A rectangular plate `a × b × t` with a circular hole of radius `r` at `(xc, yc)`, pulled by a total force `F`. The support model is a **roller plus a single mid‑edge anchor**, not a clamp: clamping would forbid the Poisson contraction and manufacture a *singular* corner stress that never converges, poisoning both the peak‑stress verdict and any field data taken from the run.
+
+- **Stress concentration vs theory:** `Kt` = 2.2395 (FEM) vs 2.2330 (Howland/Peterson net‑section fit) → **0.29 % error** (tolerance 3 %).
+- **Tolerance set by measurement, not guesswork:** sweeping the hole radius across the whole design range (`2r/b` from 0.16 to 0.60) puts the worst deviation at 0.59 %, against a reference fit whose own stated accuracy is ~1 %.
+- **Mesh convergence:** refining 32 → 64 → 126 elements around the hole moves `Kt` 2.2395 → 2.2441 → 2.2471 while the free‑surface traction residual falls 6.2 % → 2.7 % → 0.7 %. The peak converges to a finite value — which is exactly the property that makes stress auto‑judgeable here and not on the beam.
+- **Honest N/A:** move the hole off‑centre and the reference stops applying; the `applies()` gate reports **N/A** and records the measured `Kt` instead of fabricating a verdict.
+
+| mesh + roller/anchor/load | von Mises | σ_yy (compression at the hole flanks) |
+|---|---|---|
+| ![plate mesh](docs/plate_mesh.png) | ![plate von Mises](docs/plate_stress_vm.png) | ![plate sigma_yy](docs/plate_stress_yy.png) |
+
+The middle figure peaks exactly where Kirsch's classical solution says it must — on the transverse diameter, `θ = ±90°`. The right‑hand figure is the corroborating signature: σ_yy goes **compressive** at the hole's left and right flanks under a purely tensile load.
+
+### CNN stress‑field surrogate
+
+The verified pipeline then becomes a **data generator**: 545 plate cases, every one of them cleared through the same physics gates, exported as regular‑grid tensors and used to train a UNet that predicts the stress field directly from the geometry.
+
+| split | n | field nRMSE | Kt error vs FEA | Kt bias |
+|---|---|---|---|---|
+| test (held out) | 62 | **1.00 %** | 4.58 % | −4.58 % |
+| OOD — larger holes than trained on | 92 | 3.06 % | 6.10 % | −6.08 % |
+| OOD — a plate proportion never seen | 40 | **25.73 %** | 21.97 % | +18.93 % |
+
+Three things this table is meant to be honest about:
+
+- **The peak error decomposes.** Of the 4.58 % on Kt, about 3.0 % is the pixel grid's own representation floor — the peak sits exactly on the hole boundary, where no pixel centre can sit — and only ~2.2 % is the network. The true FEA peak is stored with every case precisely so that split can be shown rather than assumed.
+- **A 1 % field error does not mean a 1 % answer.** The five worst test cases have field errors of 0.5–1.0 % and Kt errors up to 14.5 %. The peak occupies ~0.04 % of the pixels, so a plain field loss barely notices it; the model under‑predicts peaks systematically, as convolutional smoothing predicts.
+- **It fails silently outside its envelope.** On a plate proportion it never trained on, the model invents stress patterns that are not there and flips from under‑ to over‑prediction. The equilibrium residual — a physics check deliberately kept *out* of the loss — does rise on those cases, so it works as a trust signal without ground truth, though it is coarse enough to miss the milder extrapolation failure.
+
+Kt and the equilibrium residual were kept out of the training objective on purpose: a metric you have optimised is no longer independent evidence.
+
+📄 **[Full surrogate report](docs/surrogate_review.html)** — dataset construction, metric definitions, failure analysis and limits.
+
 ---
 
 ## Ethics & privacy
@@ -158,7 +223,7 @@ A dark "control‑room" UI. A clarification chat resolves the request (asks for 
 - **Human‑in‑the‑loop.** Diagnostics only advises; it never modifies inputs or re‑runs anything. An unknown material **halts and asks** the human to define it rather than guessing. Off‑topic requests are declined.
 - **Honesty over false confidence.** Stress is reported as **N/A** with the reason, not a fake pass; when no analytical reference applies the verdict is **N/A**; assumed defaults are disclosed explicitly.
 - **Privacy / secrets.** API keys are read only from the environment (`.env`, gitignored); they are never hard‑coded or logged (only the key *length* is printed by the connectivity check).
-- **Stated limitations.** Linear‑elastic, small‑strain, slender‑beam scope; stress not auto‑verified; verification scope is the tip‑loaded cantilever (backed by a small RAG reference library).
+- **Stated limitations.** Linear‑elastic, small‑strain. Two geometries: the tip‑loaded cantilever (slender‑beam scope; stress not auto‑verified) and the plane‑stress plate with a hole (thin‑plate scope; displacement not auto‑verified, and the SCF reference applies only to a reasonably centred hole). Natural‑language entry currently covers the cantilever; the plate runs from prepared parameters.
 
 ---
 
@@ -180,6 +245,9 @@ physics_validation.py           # layer 5 — fast‑fail sanity gate
 postprocess.py                  # layer 6 — .vtu + PNG renders (PyVista)
 verification.py                 # layer 7 — RAG‑retrieved reference, deterministic error
 diagnostics.py                  # layer 8 — LLM root‑cause advisor (RAG‑augmented)
+batch_run.py                    # M10 — batch the design space, one manifest row per case
+export_field.py                 # M11 — FE solution -> regular-grid tensors (.npz)
+surrogate/                      # M12 — the CNN: dataset / model / train / evaluate
 run_all.sh                      # CLI orchestration (deterministic chain)
 app.py                          # Streamlit dashboard (live chat + DEMO replay)
 pipeline_run.py                 # in‑process orchestrator behind the dashboard
@@ -188,8 +256,12 @@ record_demo.py · record_chat.py # record demo/ run snapshots + clarification th
 demo/                           # pre‑recorded runs + chat for DEMO_MODE (no key needed)
 .streamlit/                     # dashboard theme config
 llm_config.py · llm_check.py · check_env.py        # config & health checks
-cantilever_mvp_plan.md          # full design spec (source of truth)
 ```
+
+Design rationale lives with the thing it justifies: each measured threshold
+carries its own evidence in the comment next to it — the ligament meshing rule
+in `mesh.py`, the traction normalisation in `physics_validation.py`, the grid
+resolution in `export_field.py`, the SCF tolerance in `params.py`.
 
 ---
 
@@ -199,11 +271,16 @@ cantilever_mvp_plan.md          # full design spec (source of truth)
 
 - ✅ **Retrieval‑augmented reference selection** — semantic retrieval over a ChromaDB vector store (reference solutions, material notes, failure patterns); a deterministic `applies()` gate still makes the final pick and diagnostics is RAG‑augmented. The "agent retrieves, code decides" seam keeps the iron law intact (it gracefully falls back to a deterministic scan if retrieval is unavailable).
 - ✅ **Streamlit dashboard** — a dark "control‑room" front end: a clarification chat resolves the request, then a clickable eight‑stage walkthrough shows the action flow, annotated mesh, plots, the RAG‑selected reference and acceptance reports. Live mode runs the real pipeline; DEMO mode replays recorded snapshots with no key or solver.
+- ✅ **Second geometry — 2D plane‑stress plate with a hole** — proving the architecture generalises rather than being one hard‑coded problem. Every layer dispatches on `geometry.type`, the naming contract and the iron laws are unchanged, and the plate flips *which* quantity is auto‑judged (stress, not displacement) because its physics differs. Both geometries run end to end from one `run_all.sh`.
+
+- ✅ **CNN stress‑field surrogate** — 545 cases batched over the `(r, xc, yc)` design space, exported to a regular grid, and used to train a UNet that predicts the field directly. Every case cleared the same physics gates before its field was allowed into the training set, and the held‑out sets were fixed at generation time so the out‑of‑distribution result means what it says.
 
 **Next:**
 
+- **Close the peak gap** — the model under‑predicts peak stress by ~4.6 %. A magnitude‑weighted loss is the obvious next experiment, with the current run as the baseline to beat.
+- **Widen the envelope** — training across plate proportions, to find out whether the out‑of‑distribution collapse is a data problem or a capacity one.
 - **Stage 2 — nonlinearity** — geometric (`NLGEOM`) and material (`*PLASTIC`) nonlinearity; verification evolves from "vs analytical" to "vs linear baseline" (hook reserved).
-- **More reference cases** — broaden beyond the single cantilever (simply‑supported, distributed loads) so RAG retrieval spans a larger library.
+- **Natural‑language entry for the plate** — the parameter schema already exposes the plate slots; the understanding layer's must‑have logic still has to learn them.
 
 ---
 

@@ -17,6 +17,10 @@ ccx2paraview==3.2.0       # CalculiX .frd -> .vtu
 pyvista==0.48.4           # off-screen 3D rendering (mesh + stress/displacement)
 numpy==2.4.6              # numerics
 
+# Surrogate model (the CNN half; MPS-accelerated on Apple silicon)
+torch==2.13.0             # UNet training / inference
+matplotlib==3.11.0        # result figures (scatter, fields, convergence)
+
 # Retrieval (RAG) + dashboard
 chromadb==1.5.9           # vector store for reference / knowledge retrieval
 streamlit==1.58.0         # control-room dashboard (live + DEMO replay)
