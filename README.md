@@ -166,7 +166,16 @@ streamlit run app.py             # live: type a problem, watch the 8 layers run,
 DEMO_MODE=1 streamlit run app.py # replay recorded runs — no API key, no solver needed
 ```
 
-A dark "control‑room" UI. A clarification chat resolves the request (asks for missing must‑haves, guards scope), then a clickable eight‑stage bar walks the run: the **left** panel is the action flow, the **right** panel holds the artifacts — an annotated mesh (FIXED/LOAD read straight from the `.inp`), stress/displacement plots, the RAG‑selected reference, and the acceptance reports. DEMO mode replays the snapshots in `demo/` — including the opening clarification dialogue — so it runs with no key and no solver.
+Three recorded examples ship with it. The **plate** one is deliberately phrased the way somebody would actually ask, so what it demonstrates is the *reading* as much as the solving:
+
+> *"I'd like to check an aluminium plate that has a hole in it."*
+> — the agent asks only for the plate size, hole radius and load; it never asks how the plate is held, because this geometry implements exactly one support model
+> *"It's 240 by 120 mm with a 36 mm diameter hole right in the middle, and it's pulled with 4.5 kN."*
+
+From that sentence the language layer resolves `aluminium → ALUMINUM` (E, ν, ρ then come from the curated library, never from the model), halves the **diameter** into the radius the schema wants (`r = 18`), converts **4.5 kN → 4500 N**, and reads *"right in the middle"* as a position it should leave unset so the centred default applies — reporting the centre it assumed, the 1 mm thickness it assumed and why, and the support model it applied, rather than applying any of them silently. The run then verifies at **0.551 %** against the Howland reference.
+
+A dark "control‑room" UI. A clarification chat resolves the request (asks for missing must‑haves, guards scope), then a clickable eight‑stage bar walks the run: the **left** panel is the action flow, the **right** panel holds the artifacts — an annotated mesh (FIXED/LOAD read straight from the `.inp`), stress/displacement plots, the RAG‑selected reference, and the acceptance reports. DEMO mode replays the snapshots in `demo/` — including the opening clarification dialogue — so it runs with no key and no solver:
+`cantilever_pass` (verified against beam theory), `plate_pass` (the exchange above), and `stubby_fail` (a beam too stubby for the theory, where the diagnostics agent correctly blames the theory rather than the solver).
 
 ---
 

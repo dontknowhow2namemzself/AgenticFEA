@@ -30,6 +30,17 @@ SCRIPTS = {
         "Can you check a short steel cantilever for me?",
         "20 mm long, 10x10 mm square section, fixed at one end, "
         "1000 N pushing straight down at the free tip."),
+    # The plate turn is written to exercise the READING, not just the solving.
+    # In one ordinary sentence it asks layer 1 to canonicalise a material
+    # spelling, halve a DIAMETER into the radius the schema wants, convert kN
+    # to N, and recognise "right in the middle" as a position it should leave
+    # unset so the centred default applies. It never mentions thickness or how
+    # the plate is held -- both come back as disclosed assumptions rather than
+    # as questions, because neither is something this geometry lets a user choose.
+    "plate_pass": (
+        "I'd like to check an aluminium plate that has a hole in it.",
+        "It's 240 by 120 mm with a 36 mm diameter hole right in the middle, "
+        "and it's pulled with 4.5 kN."),
 }
 
 
@@ -44,8 +55,9 @@ def _branch_capture(accum: str, chat: list) -> str:
     if not a.in_scope:
         chat.append(("agent",
             f"That's beyond what I can model yet — {a.scope_note or 'unsupported configuration'}. "
-            "I currently handle a cantilever: one end fixed, a single transverse point load at the "
-            "FREE END. Want to try that instead?"))
+            "I handle two geometries: a cantilever beam (one end fixed, a single transverse "
+            "point load at the free end), and a flat plate with one circular hole pulled in "
+            "tension. Want to try one of those?"))
         return "chatting"
     gaps = tu.must_have_gaps(a)
     if gaps:
@@ -58,6 +70,7 @@ def _branch_capture(accum: str, chat: list) -> str:
 
 
 def record(name: str, vague: str, details: str) -> None:
+    (DEMO / name).mkdir(parents=True, exist_ok=True)   # do not depend on record_demo running first
     chat: list = [("user", vague)]
     accum = vague
     phase = _branch_capture(accum, chat)
