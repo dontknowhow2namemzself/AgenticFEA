@@ -124,9 +124,11 @@ python llm_check.py
 ### Run it
 
 ```bash
-# LLM front end: NL → completed definition → validated params.py
+# LLM front end: NL → completed definition → validated params.py. Either geometry:
 python parameterize.py --write \
   "A steel cantilever 100 mm long, 10×10 mm, fixed one end, 1000 N down at the free end"
+python parameterize.py --write \
+  "A steel plate 200x100 mm with a 20 mm radius hole in the middle, pulled with 1000 N"
 
 # (optional) layer‑1 understanding with clarifying questions / off‑topic guard:
 python task_understanding.py --parameterize "an aluminium cantilever, 100mm, 10x10, 1kN at the tip"
@@ -138,7 +140,7 @@ bash run_all.sh --skip-checkpoints
 
 Outputs land in `out/`: `beam.{msh,inp,frd,vtu}`, the render set for the active geometry (`stress_{x,y,z}.png` for the beam, `stress_{xx,yy,xy,vm}.png` for the plate), `displacement.png`, `physics_report.txt`, `verification_report.txt`, and `diagnostic_report.txt` on failure.
 
-The plate can also be driven through the same in‑process orchestrator the dashboard uses, which skips the two LLM layers and runs the deterministic chain on prepared parameters — the seam the batch runner will use too:
+Either geometry can also be driven through the in‑process orchestrator the dashboard uses, skipping the two LLM layers and running the deterministic chain on prepared parameters — the same seam the batch runner uses:
 
 ```bash
 python pipeline_run.py --case plate_with_hole
@@ -223,7 +225,7 @@ Kt and the equilibrium residual were kept out of the training objective on purpo
 - **Human‑in‑the‑loop.** Diagnostics only advises; it never modifies inputs or re‑runs anything. An unknown material **halts and asks** the human to define it rather than guessing. Off‑topic requests are declined.
 - **Honesty over false confidence.** Stress is reported as **N/A** with the reason, not a fake pass; when no analytical reference applies the verdict is **N/A**; assumed defaults are disclosed explicitly.
 - **Privacy / secrets.** API keys are read only from the environment (`.env`, gitignored); they are never hard‑coded or logged (only the key *length* is printed by the connectivity check).
-- **Stated limitations.** Linear‑elastic, small‑strain. Two geometries: the tip‑loaded cantilever (slender‑beam scope; stress not auto‑verified) and the plane‑stress plate with a hole (thin‑plate scope; displacement not auto‑verified, and the SCF reference applies only to a reasonably centred hole). Natural‑language entry currently covers the cantilever; the plate runs from prepared parameters.
+- **Stated limitations.** Linear‑elastic, small‑strain. Two geometries: the tip‑loaded cantilever (slender‑beam scope; stress not auto‑verified) and the plane‑stress plate with a hole (thin‑plate scope; displacement not auto‑verified, and the SCF reference applies only to a reasonably centred hole). The plate supports exactly one circular hole under uniaxial tension — its support model is fixed by the pipeline, and that is disclosed as an assumption rather than silently applied.
 
 ---
 
@@ -280,7 +282,6 @@ resolution in `export_field.py`, the SCF tolerance in `params.py`.
 - **Close the peak gap** — the model under‑predicts peak stress by ~4.6 %. A magnitude‑weighted loss is the obvious next experiment, with the current run as the baseline to beat.
 - **Widen the envelope** — training across plate proportions, to find out whether the out‑of‑distribution collapse is a data problem or a capacity one.
 - **Stage 2 — nonlinearity** — geometric (`NLGEOM`) and material (`*PLASTIC`) nonlinearity; verification evolves from "vs analytical" to "vs linear baseline" (hook reserved).
-- **Natural‑language entry for the plate** — the parameter schema already exposes the plate slots; the understanding layer's must‑have logic still has to learn them.
 
 ---
 

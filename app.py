@@ -179,22 +179,11 @@ def _branch(accum: str):
         st.session_state.accum = ""
         return
     if not a.in_scope:
-        # Distinguish "the pipeline cannot model that" from "the pipeline models
-        # that, but this chat cannot set it up yet". Saying the plate is
-        # unsupported would misstate what the system can do.
-        if getattr(a, "geometry_type", None) and a.geometry_type != "cantilever_beam":
-            st.session_state.chat.append(("agent",
-                f"The pipeline does solve that — `{a.geometry_type}` runs through every layer and is "
-                "verified against a textbook reference. What it does not have yet is a "
-                "natural-language front end, so I cannot set it up from this chat.\n\n"
-                f"Run it from the prepared parameters instead:\n"
-                f"`python pipeline_run.py --case {a.geometry_type}`\n\n"
-                "Or describe a cantilever beam and I will take it from here."))
-        else:
-            st.session_state.chat.append(("agent",
-                f"That's beyond what I can model yet — {a.scope_note or 'unsupported configuration'}. "
-                "I currently handle a cantilever: one end fixed, a single transverse point load at the "
-                "FREE END. Want to try that instead?"))
+        st.session_state.chat.append(("agent",
+            f"That's beyond what I can model yet — {a.scope_note or 'unsupported configuration'}. "
+            "I handle two geometries: a cantilever beam (one end fixed, a single transverse "
+            "point load at the free end), and a flat plate with one circular hole pulled in "
+            "tension. Want to try one of those?"))
         st.session_state.accum = ""
         return
     gaps = tu.must_have_gaps(a)

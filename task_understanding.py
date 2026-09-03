@@ -43,7 +43,17 @@ DEFAULT_ELEM_SHAPE = "hex"
 DEFAULT_ANALYSIS_TYPE = "static"
 DEFAULT_NONLINEAR = False
 DEFAULT_TOL_DISP = 0.05
-MESH_FRACTION = 5.0  # elem_size = smallest cross-section dimension / 5
+MESH_FRACTION = 5.0        # beam: elem_size = smallest cross-section dimension / 5
+# Plate: elem_size is the FAR-FIELD size only -- the mesh layer already refines
+# locally by its own rules (>= 28 segments around the hole, >= 6 elements across
+# the thinnest ligament), so this default does not need to chase the hole. One
+# twenty-fifth of the shorter plate dimension gives 4 mm on a 200x100 plate,
+# which is the setting the whole 545-case dataset was generated at.
+PLATE_MESH_FRACTION = 25.0
+DEFAULT_PLATE_THICKNESS = 1.0   # mm; plane stress wants t << a, b and sigma ~ F/t
+                                # is a free linear rescaling, so 1 mm is the
+                                # natural unit choice rather than a guess
+DEFAULT_PLATE_ELEM_SHAPE = "quad"
 
 
 class TaskAssessment(BaseModel):
@@ -53,16 +63,25 @@ class TaskAssessment(BaseModel):
     off_topic_reason: Optional[str] = None
     in_scope: bool = True
     scope_note: Optional[str] = None
-    # Which pipeline geometry the description is about, when it is recognisably
-    # one of them. This separates "the pipeline cannot model that" from "the
-    # pipeline models that, but this chat front end cannot set it up yet" --
-    # the plate is supported by every deterministic layer, only its
-    # natural-language entry is still missing (plate plan M13).
+    # Which pipeline geometry the description is about. It is chosen FIRST,
+    # because it decides which slots are must-haves, what the clarifying
+    # question should ask for, and which defaults apply (plate plan M13).
     geometry_type: Optional[str] = None
     geometry_specified: bool = False
+    # cantilever_beam slots
     L: Optional[float] = None
     h: Optional[float] = None
     b: Optional[float] = None
+    # plate_with_hole slots. The hole centre is optional by design: "a plate
+    # with a hole in the middle" is the common phrasing and centring is the
+    # textbook configuration, so an unstated centre is a disclosed default
+    # rather than a missing must-have.
+    plate_a: Optional[float] = None
+    plate_b: Optional[float] = None
+    plate_t: Optional[float] = None
+    hole_r: Optional[float] = None
+    hole_xc: Optional[float] = None
+    hole_yc: Optional[float] = None
     material_specified: bool = False
     material_name: Optional[str] = None
     fixed_specified: bool = False
@@ -86,20 +105,38 @@ cantilever-beam pipeline and call report_understanding. Rules:
 - Decide is_fea_task: false only for things that are not solid-mechanics / FEA
   problems at all (greetings, chit-chat, unrelated questions). If false, give a
   short off_topic_reason and leave the rest empty.
-- Set geometry_type when the description is recognisably one of the pipeline's
-  geometries: "cantilever_beam" for a beam clamped at one end, or
-  "plate_with_hole" for a flat plate/sheet/strip with a circular hole in it
-  under tension. A plate with a hole IS a real FEA problem this pipeline
-  solves, so is_fea_task stays true for it; set in_scope=false with the
-  scope_note "plate_with_hole has no natural-language entry yet" and leave the
-  beam dimensions empty, because only the beam can be set up from chat today.
-- SUPPORTED SCOPE for THIS chat entry: exactly one cantilever beam with ONE end fully fixed
-  (clamped) and a SINGLE TRANSVERSE POINT LOAD at the opposite FREE END. NOT
-  supported: a load anywhere but the free end (e.g. mid-span / in the middle),
-  more than one fixed end (both ends fixed / clamped-clamped / simply supported),
-  distributed loads, multiple loads, axial-only loads, or non-beam geometry. If
-  the request clearly needs an unsupported feature, set in_scope=false with a
-  one-line scope_note naming it; otherwise set in_scope=true.
+- FIRST set geometry_type, which decides which slots matter:
+    "cantilever_beam"  -- a beam/bar clamped at one end with a transverse load
+                          at the free end.
+    "plate_with_hole"  -- a flat plate / sheet / strip / panel with a circular
+                          hole (or bore / opening / cutout) in it, pulled in
+                          tension.
+  Both are fully supported; set in_scope=true for either.
+- cantilever_beam SCOPE: exactly ONE end fully fixed (clamped) and a SINGLE
+  TRANSVERSE POINT LOAD at the opposite FREE END. NOT supported: a load
+  anywhere but the free end (e.g. mid-span), more than one fixed end
+  (clamped-clamped / simply supported), distributed loads, multiple loads,
+  axial-only loads.
+  Slots: L (length), h (height, the load direction), b (width), all in mm.
+- plate_with_hole SCOPE: ONE circular hole, uniaxial TENSION along the plate's
+  length, linear elastic plane stress. NOT supported: several holes, non-circular
+  cutouts, compression, biaxial or shear loading, bending of the plate.
+  Slots: plate_a (length along the pull direction), plate_b (width across it),
+  plate_t (thickness), hole_r (hole RADIUS), hole_xc / hole_yc (hole centre
+  measured from the LOWER-LEFT corner of the plate), all in mm.
+  * If the user gives a DIAMETER, halve it and put the radius in hole_r.
+  * Leave hole_xc / hole_yc null when the hole is described as centred / "in the
+    middle", or when its position is not mentioned at all. Only fill them when a
+    genuine off-centre position is given, and convert it to lower-left-corner
+    coordinates first.
+  * Leave plate_t null when no thickness is given.
+  * The plate's supports are NOT a user choice (the pipeline always uses a
+    roller plus a mid-edge anchor and pulls the far edge), so do not treat a
+    missing support description as a gap: set fixed_specified=true whenever the
+    description makes clear the plate is being pulled or held.
+  * load_magnitude is the TOTAL tensile force in N. Convert a stated stress to a
+    force only if the user gives one (force = stress x b x t); otherwise leave
+    load_specified=false.
 - For each dimension set *_specified to whether the USER ACTUALLY STATED it.
   Do NOT invent or assume values. Only fill a value when the user gave it (a
   strongly implied value, e.g. a downward load on a horizontal cantilever, may
@@ -146,14 +183,29 @@ def _material_ok(a: TaskAssessment) -> bool:
     return bool(a.material_specified and resolve_material(a.material_name)[1] is not None)
 
 
+def is_plate(a: TaskAssessment) -> bool:
+    return a.geometry_type == "plate_with_hole"
+
+
 def must_have_gaps(a: TaskAssessment) -> list:
-    """The MUST-HAVE dimensions the description does not (validly) specify."""
+    """The MUST-HAVE dimensions the description does not (validly) specify.
+
+    What counts as a must-have differs per geometry, because what the pipeline
+    can honestly default differs. The beam needs to be told which end is
+    clamped and where the load acts; the plate's support model is not a user
+    choice at all (roller plus a mid-edge anchor, pulled on the far edge is the
+    only configuration this geometry implements), so asking for it would be
+    theatre. Thickness and hole centre are defaulted and disclosed instead.
+    """
     gaps = []
-    if not (a.geometry_specified and a.L and a.h and a.b):
+    if is_plate(a):
+        if not (a.geometry_specified and a.plate_a and a.plate_b and a.hole_r):
+            gaps.append("geometry")
+    elif not (a.geometry_specified and a.L and a.h and a.b):
         gaps.append("geometry")
     if not _material_ok(a):
         gaps.append("material")
-    if not a.fixed_specified:
+    if not is_plate(a) and not a.fixed_specified:
         gaps.append("fixed")
     if not a.load_specified:
         gaps.append("load")
@@ -162,6 +214,9 @@ def must_have_gaps(a: TaskAssessment) -> list:
 
 def _gap_line(gap: str, a: TaskAssessment) -> str:
     if gap == "geometry":
+        if is_plate(a):
+            return ("geometry: plate length a and width b, and hole radius r, in mm "
+                    "(e.g. 200 x 100 plate with a 20 mm radius hole)")
         return "geometry: length L, height h, width b in mm (e.g. 100 x 10 x 10)"
     if gap == "material":
         known = ", ".join(material_names())
@@ -172,6 +227,8 @@ def _gap_line(gap: str, a: TaskAssessment) -> str:
     if gap == "fixed":
         return "fixed: which end is clamped"
     if gap == "load":
+        if is_plate(a):
+            return "load: total tensile force in N (e.g. 1000 N pulling the plate)"
         return "load: magnitude in N, which end, and direction (e.g. 1000 N down at the free end)"
     return gap
 
@@ -187,6 +244,8 @@ def consolidated_question(gaps: list, a: TaskAssessment) -> str:
 def apply_defaults(a: TaskAssessment) -> tuple:
     """Fill DEFAULTABLE dimensions from the deterministic policy; return
     (resolved, assumptions). Assumes the must-haves are present and valid."""
+    if is_plate(a):
+        return _apply_plate_defaults(a)
     assumptions = []
     canonical, _props = resolve_material(a.material_name)  # valid here (not a gap)
     resolved = {
@@ -229,8 +288,73 @@ def apply_defaults(a: TaskAssessment) -> tuple:
     return resolved, assumptions
 
 
+def _apply_plate_defaults(a: TaskAssessment) -> tuple:
+    """Plate policy. Everything assumed is returned in `assumptions` and shown
+    to the user -- an assumption the user never sees is a fabrication."""
+    assumptions = []
+    canonical, _props = resolve_material(a.material_name)
+    pa, pb = float(a.plate_a), float(a.plate_b)
+    resolved = {"geometry_type": "plate_with_hole", "a": pa, "b": pb,
+                "r": float(a.hole_r),
+                "material_name": canonical or a.material_name,
+                "load_magnitude": a.load_magnitude}
+
+    if a.plate_t:
+        resolved["t"] = float(a.plate_t)
+    else:
+        resolved["t"] = DEFAULT_PLATE_THICKNESS
+        assumptions.append(f"plate thickness t = {DEFAULT_PLATE_THICKNESS} mm "
+                           f"[plane stress; stress scales as F/t, so t is a free unit choice]")
+    if a.hole_xc is not None and a.hole_yc is not None:
+        resolved["xc"], resolved["yc"] = float(a.hole_xc), float(a.hole_yc)
+    else:
+        resolved["xc"], resolved["yc"] = pa / 2.0, pb / 2.0
+        assumptions.append(f"hole centred at ({pa/2:g}, {pb/2:g}) mm "
+                           f"[the Kirsch/Howland reference configuration]")
+    # Not a user choice: this geometry implements exactly one support model.
+    assumptions.append("supports = roller on the left edge (u_x = 0) plus one "
+                       "mid-edge anchor (u_y = 0); load = uniform tension on the "
+                       "right edge [the only configuration this geometry implements]")
+
+    if a.mesh_specified and a.mesh_elem_size:
+        resolved["elem_size"] = float(a.mesh_elem_size)
+    else:
+        elem_size = round(min(pa, pb) / PLATE_MESH_FRACTION, 6)
+        resolved["elem_size"] = elem_size
+        assumptions.append(f"far-field mesh elem_size = {elem_size} mm "
+                           f"[policy: min(a, b) / {PLATE_MESH_FRACTION:g}; the mesh layer "
+                           f"refines the hole and the ligament by its own rules]")
+    resolved["elem_order"] = DEFAULT_ELEM_ORDER
+    resolved["elem_shape"] = DEFAULT_PLATE_ELEM_SHAPE
+    assumptions.append(f"element order = {DEFAULT_ELEM_ORDER}, shape = "
+                       f"{DEFAULT_PLATE_ELEM_SHAPE} [2D plane stress convention]")
+
+    if a.analysis_specified:
+        resolved["analysis_type"] = a.analysis_type or DEFAULT_ANALYSIS_TYPE
+        resolved["nonlinear"] = bool(a.nonlinear)
+    else:
+        resolved["analysis_type"] = DEFAULT_ANALYSIS_TYPE
+        resolved["nonlinear"] = DEFAULT_NONLINEAR
+        assumptions.append(f"analysis = {DEFAULT_ANALYSIS_TYPE}, linear [default]")
+    resolved["tol_disp"] = DEFAULT_TOL_DISP
+    return resolved, assumptions
+
+
 def build_description(r: dict) -> str:
     """A complete, explicit problem statement for parameterize.py (layer 2)."""
+    if r.get("geometry_type") == "plate_with_hole":
+        lin = "nonlinear" if r["nonlinear"] else "linear"
+        return (
+            f"A {r['material_name']} flat plate in 2D plane stress, "
+            f"a={r['a']} mm along x by b={r['b']} mm along y, thickness t={r['t']} mm, "
+            f"with a circular hole of radius r={r['r']} mm centred at "
+            f"(xc={r['xc']}, yc={r['yc']}) mm measured from the lower-left corner. "
+            f"Supported by a roller on edge_x_min (u_x = 0) plus a single mid-edge "
+            f"anchor node (u_y = 0); a total tensile force of {r['load_magnitude']} N "
+            f"applied on edge_x_max in the +x direction. "
+            f"Mesh element size {r['elem_size']} mm, order {r['elem_order']}, "
+            f"{r['elem_shape']}. Analysis: {r['analysis_type']}, {lin}."
+        )
     lin = "nonlinear" if r["nonlinear"] else "linear"
     return (
         f"A {r['material_name']} cantilever beam, length L={r['L']} mm, "
@@ -252,13 +376,6 @@ def run_task_understanding(description: str, auto: bool = False, max_rounds: int
     cur_desc = description
     for _round in range(max_rounds + 1):
         if not assessment.in_scope:
-            # A geometry the pipeline HAS is reported as such, with the way to
-            # run it -- claiming it is unsupported would be untrue.
-            if assessment.geometry_type and assessment.geometry_type != "cantilever_beam":
-                return {"status": "no_nl_entry", "geometry_type": assessment.geometry_type,
-                        "reason": (f"{assessment.geometry_type} is supported by the pipeline but "
-                                   f"not yet through natural-language entry"),
-                        "how_to_run": f"python pipeline_run.py --case {assessment.geometry_type}"}
             return {"status": "out_of_scope",
                     "reason": assessment.scope_note or "outside the supported scope"}
         gaps = must_have_gaps(assessment)
@@ -285,6 +402,43 @@ def run_task_understanding(description: str, auto: bool = False, max_rounds: int
 
 
 def _print_result(result: dict) -> int:
+    print()
+    plate_ok = True
+    full = TaskAssessment(is_fea_task=True, geometry_type="plate_with_hole",
+                          geometry_specified=True, plate_a=200, plate_b=100, hole_r=20,
+                          material_specified=True, material_name="STEEL",
+                          fixed_specified=True, load_specified=True, load_magnitude=1000)
+    gaps = must_have_gaps(full)
+    print(f"6) plate, centred hole, no thickness given -> gaps {gaps} (expect [])")
+    plate_ok &= (gaps == [])
+    resolved, assumptions = apply_defaults(full)
+    print(f"   defaults: t={resolved['t']} centre=({resolved['xc']}, {resolved['yc']}) "
+          f"elem_size={resolved['elem_size']} shape={resolved['elem_shape']}")
+    plate_ok &= (resolved["t"] == 1.0 and resolved["xc"] == 100 and resolved["yc"] == 50
+                 and resolved["elem_size"] == 4.0 and resolved["elem_shape"] == "quad")
+    print(f"   every assumption disclosed: {len(assumptions)} lines")
+    plate_ok &= any("thickness" in a for a in assumptions) and any("centred" in a for a in assumptions)
+    print(f"   description: {build_description(resolved)[:88]}...")
+
+    thin = TaskAssessment(is_fea_task=True, geometry_type="plate_with_hole",
+                          geometry_specified=True, plate_a=200, plate_b=100,
+                          material_specified=True, material_name="STEEL",
+                          fixed_specified=True, load_specified=True, load_magnitude=1000)
+    g2 = must_have_gaps(thin)
+    print(f"7) plate WITHOUT a hole radius -> gaps {g2} (expect ['geometry'])")
+    print(f"   would ask: {_gap_line('geometry', thin)}")
+    plate_ok &= (g2 == ["geometry"]) and "radius" in _gap_line("geometry", thin)
+
+    nosup = TaskAssessment(is_fea_task=True, geometry_type="plate_with_hole",
+                           geometry_specified=True, plate_a=200, plate_b=100, hole_r=20,
+                           material_specified=True, material_name="STEEL",
+                           fixed_specified=False, load_specified=True, load_magnitude=1000)
+    g3 = must_have_gaps(nosup)
+    print(f"8) plate with no support description -> gaps {g3} (expect []; the plate's "
+          f"support model is not a user choice)")
+    plate_ok &= (g3 == [])
+    ok = ok and plate_ok
+
     print("-" * 64)
     status = result["status"]
     if status == "rejected":
