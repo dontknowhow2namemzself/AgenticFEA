@@ -224,6 +224,8 @@ Three things this table is meant to be honest about:
 
 Kt and the equilibrium residual were kept out of the training objective on purpose: a metric you have optimised is no longer independent evidence.
 
+One thing the surrogate is *not* limited by is the material. All 545 cases are steel, but the target is stress divided by the nominal applied stress, and in plane elasticity with traction boundary conditions that ratio is independent of the elastic constants when the resultant on each internal boundary vanishes — which a traction‑free hole satisfies (Michell's theorem). Re‑solving one geometry in steel, aluminium and copper — a 3× spread in E and ν from 0.30 to 0.34 — moves Kt by 2 parts in 100 000 and the whole normalised field by under 0.2 %. Displacement is a different story: it scales as 1/E, and the surrogate does not predict it.
+
 📄 **[Full surrogate report](docs/surrogate_review.html)** — dataset construction, metric definitions, failure analysis and limits.
 
 ---

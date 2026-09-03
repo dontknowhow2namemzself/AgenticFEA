@@ -378,12 +378,25 @@ def render_artifact(a: dict):
         else:
             st.caption("(no image)")
     elif kind == "views":
-        labels = {"z": "σ · Z (top)", "y": "σ · Y (side)", "x": "σ · X (section)", "disp": "displacement"}
-        choice = st.radio("view", list(labels.values()), horizontal=True, label_visibility="collapsed")
-        key = [k for k, v in labels.items() if v == choice][0]
-        p = Path(_img(a["views"][key]))
-        if p.exists():
-            st.image(_img(a["views"][key]), use_container_width=True)
+        # The options come from the artifact itself, not from a fixed list: the
+        # two geometries render different things (a 3D solid is shown from three
+        # camera directions, a flat plate as its stress components in one top
+        # view), so hard-coding one geometry's keys makes the other one crash.
+        views = a.get("views", {})
+        pretty = {"z": "σ · Z (top)", "y": "σ · Y (side)", "x": "σ · X (section)",
+                  "disp": "displacement"}
+        keys = list(views)
+        labels = [pretty.get(k, k) for k in keys]
+        if not keys:
+            st.caption("(no views)")
+            return
+        # Keying on the option set keeps a previous geometry's selection from
+        # leaking in when the user switches demos.
+        choice = st.radio("view", labels, horizontal=True, label_visibility="collapsed",
+                          key="views_" + "_".join(keys))
+        src = views[keys[labels.index(choice)]]
+        if Path(_img(src)).exists():
+            st.image(_img(src), use_container_width=True)
         else:
             st.caption("(no image)")
     elif kind == "code":
