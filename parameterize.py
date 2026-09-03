@@ -77,6 +77,13 @@ PLATE_WITH_HOLE (2D plane stress)
   1/25 of the smaller plate dimension for a plate.
 - Fill every required slot. Do NOT perform engineering analysis or predict
   results; only translate the description into parameter values.
+- NEVER change a value the description states in order to make validation
+  pass. If a validation error comes back and the only way to satisfy it would
+  be to alter a stated dimension, load or material, do NOT nudge the number --
+  repeat the same values. Shrinking a hole that does not fit answers a
+  different question than the one asked, and a wrong answer that validates is
+  worse than an error. (Layer 1 screens impossible geometry before this point;
+  this rule is the backstop for anything that slips past it.)
 """
 
 DEFAULT_DESCRIPTION = (

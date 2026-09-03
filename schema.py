@@ -51,6 +51,21 @@ GEOMETRY_ELEM_SHAPES = {
 }
 SUPPORTED_GEOMETRIES = tuple(BOUNDARY_LABELS)  # extend by adding a subset model + label set
 
+# Thinnest strip of material the pipeline will accept between a hole and a plate
+# edge. Derived, not chosen: the mesh layer puts LIGAMENT_MIN_ELEMS across the
+# ligament and will not refine finer than elem_size / MAX_REFINE_RATIO, so
+# anything thinner cannot be meshed at a bounded cost. Expressed against the
+# default far-field size so validation does not have to know the mesh settings.
+_DEFAULT_ELEM_SIZE_FRACTION = 25.0   # far-field elem_size ~ min(a, b) / 25
+_LIGAMENT_MIN_ELEMS = 6
+_MAX_REFINE_RATIO = 20
+
+
+def min_usable_ligament(a: float, b: float) -> float:
+    """Smallest hole-to-edge material width the mesh layer can resolve."""
+    elem_size = min(a, b) / _DEFAULT_ELEM_SIZE_FRACTION
+    return _LIGAMENT_MIN_ELEMS * elem_size / _MAX_REFINE_RATIO
+
 # Plausible SI-mm magnitude bands. Out-of-band values are WARNINGS (not hard
 # limits): they flag a likely unit error for a human to judge, without blocking.
 # (With the materials library the LLM no longer fills these -- this is a safety
@@ -95,14 +110,36 @@ class PlateWithHoleGeom(BaseModel):
         }
 
     @model_validator(mode="after")
-    def _hole_strictly_inside(self):
+    def _hole_leaves_usable_material(self):
+        """The hole must leave a ligament the pipeline can actually analyse.
+
+        "> 0" is a mathematical condition, not an engineering one: a hole
+        0.001 mm from the edge passes it, and is not a plate with a hole at
+        all. It also has a concrete failure mode -- the mesh policy puts a
+        fixed number of elements across the thinnest ligament, so a vanishing
+        ligament asks for a vanishing element size, which does not fail
+        loudly, it just never finishes. The floor here is the same one the
+        mesh layer enforces (mesh.MAX_REFINE_RATIO), so what validation
+        accepts and what the mesher can build are the same set.
+        """
         lig = self.ligaments()
         bad = {k: v for k, v in lig.items() if v <= 0.0}
         if bad:
             raise ValueError(
-                f"hole (r={self.r}, center ({self.xc}, {self.yc})) is not "
-                f"strictly inside the {self.a} x {self.b} plate; non-positive "
-                f"ligament(s): { {k: round(v, 6) for k, v in bad.items()} }"
+                f"hole (r={self.r}, center ({self.xc}, {self.yc})) does not fit inside "
+                f"the {self.a} x {self.b} mm plate: it crosses the edge on "
+                f"{sorted(bad)} (ligament {min(bad.values()):.4g} mm). "
+                f"A hole of radius {self.r} needs a plate at least "
+                f"{2 * self.r:.4g} mm across in each direction."
+            )
+        worst = min(lig.values())
+        floor = min_usable_ligament(self.a, self.b)
+        if worst < floor:
+            raise ValueError(
+                f"hole (r={self.r}, center ({self.xc}, {self.yc})) leaves only "
+                f"{worst:.4g} mm of material at its thinnest point, below the "
+                f"{floor:.4g} mm this pipeline can mesh and analyse. Move the hole "
+                f"away from the edge or reduce its radius."
             )
         return self
 

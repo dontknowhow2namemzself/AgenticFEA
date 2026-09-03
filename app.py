@@ -186,6 +186,15 @@ def _branch(accum: str):
             "tension. Want to try one of those?"))
         st.session_state.accum = ""
         return
+    impossible = tu.geometry_impossible(a)
+    if impossible:
+        # Reported, never repaired. Adjusting the user's numbers to make the
+        # geometry valid would answer a different question than the one asked.
+        st.session_state.chat.append(("agent",
+            f"That geometry cannot exist as described — {impossible}\n\n"
+            "Tell me corrected numbers and I will run it."))
+        st.session_state.accum = ""
+        return
     gaps = tu.must_have_gaps(a)
     if gaps:
         st.session_state.chat.append(("agent", tu.consolidated_question(gaps, a)))

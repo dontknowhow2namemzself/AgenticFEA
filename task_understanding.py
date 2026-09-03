@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 import llm_config
 from knowledge.materials import material_names, resolve_material
+from schema import min_usable_ligament
 
 # Deterministic default policy for the DEFAULTABLE dimensions (code, not LLM).
 DEFAULT_ELEM_ORDER = 2
@@ -185,6 +186,39 @@ def _material_ok(a: TaskAssessment) -> bool:
 
 def is_plate(a: TaskAssessment) -> bool:
     return a.geometry_type == "plate_with_hole"
+
+
+def geometry_impossible(a: TaskAssessment) -> Optional[str]:
+    """Why the described geometry cannot exist, or None if it can.
+
+    This belongs HERE, before parameterization, and the reason is specific.
+    Layer 2 asks the model to fill slots and re-prompts it with any validation
+    error, so a geometry that fails validation invites the model to make the
+    error go away -- and it does: asked again about a 50 mm hole in a 100 mm
+    plate, it returned r = 49.999, silently editing the number the user gave
+    to slip past the gate. That is precisely the failure this project exists
+    to prevent, and no wording of the retry prompt can be relied on to stop
+    it. Catching it before layer 2 means the user is told their problem is
+    impossible instead of being handed a different problem's answer.
+    """
+    if not is_plate(a) or not (a.plate_a and a.plate_b and a.hole_r):
+        return None
+    pa, pb, r = float(a.plate_a), float(a.plate_b), float(a.hole_r)
+    xc = float(a.hole_xc) if a.hole_xc is not None else pa / 2.0
+    yc = float(a.hole_yc) if a.hole_yc is not None else pb / 2.0
+    lig = min(xc - r, pa - xc - r, yc - r, pb - yc - r)
+    if lig <= 0:
+        return (f"a hole of radius {r:g} mm (diameter {2 * r:g} mm) does not fit inside "
+                f"a {pa:g} x {pb:g} mm plate centred at ({xc:g}, {yc:g}) mm -- it would "
+                f"cut through the edge. The hole needs to be smaller, or the plate bigger.")
+    floor = min_usable_ligament(pa, pb)
+    if lig < floor:
+        return (f"a hole of radius {r:g} mm at ({xc:g}, {yc:g}) mm leaves only "
+                f"{lig:.3g} mm of material between the hole and the nearest edge of a "
+                f"{pa:g} x {pb:g} mm plate. Below about {floor:.3g} mm that strip cannot "
+                f"be meshed or analysed meaningfully. Reduce the radius or move the hole "
+                f"further from the edge.")
+    return None
 
 
 def must_have_gaps(a: TaskAssessment) -> list:
@@ -372,6 +406,9 @@ def run_task_understanding(description: str, auto: bool = False, max_rounds: int
     assessment = assess_task(description)
     if not assessment.is_fea_task:
         return {"status": "rejected", "reason": assessment.off_topic_reason or "not an FEA task"}
+    impossible = geometry_impossible(assessment)
+    if impossible:
+        return {"status": "impossible_geometry", "reason": impossible}
 
     cur_desc = description
     for _round in range(max_rounds + 1):

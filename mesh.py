@@ -79,6 +79,13 @@ HOLE_MIN_SEGMENTS = 24
 # hole at the same setting). Refining it -- 4.1 / 8.2 / 16.5 elements across the
 # ligament -> 12.21% / 4.09% / 1.43% -- confirmed resolution, not physics.
 LIGAMENT_MIN_ELEMS = 6
+# Local refinement may go at most this much finer than the far-field size. The
+# rules above are ratios, and a ratio has no floor: a hole left 0.001 mm from
+# the plate edge asks for 0.00017 mm elements, which is not a failure the
+# mesher reports -- it is 4e11 elements and a run that never returns. Bounding
+# the ratio turns "cannot mesh this" into an error instead of a hang, and it
+# defines what the schema should refuse in the first place.
+MAX_REFINE_RATIO = 20
 REFINE_DIST_MIN_R = 0.3    # uniform fine band within 0.3*r of the hole edge
 REFINE_DIST_MAX_R = 2.0    # linear growth back to elem_size by 2*r away
 PLATE_AREA_TOL = 0.005     # mesh-area gate vs a*b - pi*r^2 (0.5%; includes the
@@ -333,9 +340,18 @@ def _build_plate_mesh(params: dict, verbose: bool = False) -> dict:
             f"elem_shape={elem_shape!r} is not a 2D strategy (plate: quad | tri)")
 
     min_ligament = min(xc - r, a - xc - r, yc - r, b - yc - r)
+    h_floor = elem_size / MAX_REFINE_RATIO
     h_hole = min(elem_size,
                  2.0 * math.pi * r / HOLE_TARGET_SEGMENTS,
                  min_ligament / LIGAMENT_MIN_ELEMS)
+    if h_hole < h_floor:
+        raise ValueError(
+            f"geometry cannot be meshed at a bounded cost: the thinnest ligament is "
+            f"{min_ligament:.4g} mm, so resolving it with {LIGAMENT_MIN_ELEMS} elements "
+            f"would need {h_hole:.3g} mm elements -- finer than the floor "
+            f"{h_floor:.3g} mm (elem_size / {MAX_REFINE_RATIO}). Move the hole away "
+            f"from the edge or make it smaller."
+        )
     tol = 1e-6 * max(a, b)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
