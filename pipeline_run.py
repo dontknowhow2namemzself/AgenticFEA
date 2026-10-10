@@ -70,6 +70,46 @@ def _diagnose(stage: str, params: dict, paths: RunPaths) -> dict:
 STAGE_ORDER = ["understand", "parameterize", "preprocess", "solve", "physics", "postprocess", "verify"]
 
 
+def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
+    """The Post-Process stage record, from postprocess.run_postprocess's summary.
+
+    One place builds it, so a demo snapshot refreshed without re-running the
+    language layers (record_demo --refresh-renders) gets exactly the stage a
+    live run would.
+    """
+    if is_plate:
+        views = {"vM": str(paths.plate_png("stress_vm")), "σxx": str(paths.plate_png("stress_xx")),
+                 "σyy": str(paths.plate_png("stress_yy")), "σxy": str(paths.plate_png("stress_xy")),
+                 "disp": str(paths.displacement_png)}
+        render_text, detail = "Rendered σxx / σyy / σxy / vM (top view) + deformed", "5 fields"
+    else:
+        views = {"z": str(paths.beam_stress_png("z")), "y": str(paths.beam_stress_png("y")),
+                 "x": str(paths.beam_stress_png("x")), "disp": str(paths.displacement_png)}
+        render_text, detail = "Rendered von Mises end / side / top + deformed side", "3 views"
+    render_action = {"text": render_text,
+                     "data": post["render_error"] or (f"same fringe, range and edges as the 3D view"
+                                                      f" · warp ×{post['warp_factor']:.3g} auto"),
+                     "status": "fail" if post["render_error"] else "pass"}
+    # The interactive 3D view leads the panel; the PNGs stay below it as the
+    # fixed views worth keeping. A failed export only drops the 3D view.
+    view = post.get("viewer") or {}
+    view_artifact = ([{"kind": "viewer3d", "title": "interactive 3D", "path": view["path"]}]
+                     if view else [])
+    view_action = {"text": "Exported interactive 3D view",
+                   "data": (f"{view['n_triangles']} triangles · {view['n_edges']} element edges"
+                            if view else post.get("viewer_error", "")),
+                   "status": "pass" if view else "fail"}
+    return dict(
+        id="postprocess", label="Post-Process", status="pass", detail=detail,
+        actions=[{"text": "ccx2paraview · beam.frd → beam.vtu", "data": f"{post['n_points']} points", "status": "pass"},
+                 {"text": "Extracted field maxima",
+                  "data": f"|U|_max = {post['max_disp']:.4f} mm · σ_vM = {post['max_vm']:.1f} MPa", "status": "pass"},
+                 view_action, render_action,
+                 {"text": "Lossless check vs frd", "data": "max values match", "status": "pass"}],
+        data={"max_disp": post["max_disp"], "max_vm": post["max_vm"], "fields": post["fields"]},
+        artifacts=view_artifact + [{"kind": "views", "title": "field renders", "views": views}])
+
+
 def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit=None,
                  params: dict = None, paths: RunPaths = None) -> dict:
     """Run the pipeline and return the dashboard's run record.
@@ -256,26 +296,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
 
     # 6 -- post-processing
     post = postprocess.run_postprocess(warp_factor=warp, params=params, paths=paths)
-    if is_plate:
-        views = {"vM": str(paths.plate_png("stress_vm")), "σxx": str(paths.plate_png("stress_xx")),
-                 "σyy": str(paths.plate_png("stress_yy")), "σxy": str(paths.plate_png("stress_xy")),
-                 "disp": str(paths.displacement_png)}
-        render_note = ("Rendered σxx / σyy / σxy / vM (top view)",
-                       f"diverging scale about zero · warp ×{post['warp_factor']:.0f} auto")
-        detail = "5 fields"
-    else:
-        views = {"z": str(paths.beam_stress_png("z")), "y": str(paths.beam_stress_png("y")),
-                 "x": str(paths.beam_stress_png("x")), "disp": str(paths.displacement_png)}
-        render_note = ("Rendered von Mises X / Y / Z", "PyVista off-screen")
-        detail = "3 views"
-    stage(id="postprocess", label="Post-Process", status="pass", detail=detail,
-          actions=[{"text": "ccx2paraview · beam.frd → beam.vtu", "data": f"{post['n_points']} points", "status": "pass"},
-                   {"text": "Extracted field maxima",
-                    "data": f"|U|_max = {post['max_disp']:.4f} mm · σ_vM = {post['max_vm']:.1f} MPa", "status": "pass"},
-                   {"text": render_note[0], "data": render_note[1], "status": "pass"},
-                   {"text": "Lossless check vs frd", "data": "max values match", "status": "pass"}],
-          data={"max_disp": post["max_disp"], "max_vm": post["max_vm"], "fields": post["fields"]},
-          artifacts=[{"kind": "views", "title": "field renders", "views": views}])
+    stage(**postprocess_stage(post, is_plate, paths))
 
     # 7 -- numerical verification. Which quantity is judged depends on the
     # geometry (plate plan D3): the beam judges displacement, the plate judges

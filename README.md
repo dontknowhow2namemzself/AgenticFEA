@@ -41,7 +41,7 @@ That inversion is the point: each geometry is judged on the quantity its own phy
 | 3 | **Pre‑processing** | `gmsh` box + neutral face labels → FIXED/LOAD mapping → CalculiX `.inp` (incl. Gmsh→CalculiX C3D20 node remap) | deterministic code |
 | 4 | **Solve** | run CalculiX `ccx`; fill the Apple‑silicon performance cores | CalculiX |
 | 5 | **Physics validation** | cheap, deterministic sanity checklist (force/moment balance, displacement sign, strain energy, NaN/Inf) — a **fast‑fail gate** | deterministic code |
-| 6 | **Post‑processing** | `.frd → .vtu` (ccx2paraview) → von Mises & displacement PNGs (PyVista, off‑screen) | deterministic code |
+| 6 | **Post‑processing** | `.frd → .vtu` (ccx2paraview) → von Mises & displacement PNGs (PyVista, off‑screen) + the data for an interactive 3D view | deterministic code |
 | 7 | **Numerical verification** | displacement vs analytical `δ = PL³/3EI` (< 5 %); **stress is recorded, not auto‑judged** | RAG retrieves reference · code gates + computes |
 | 8 | **Diagnostics** | on any failure, an LLM root‑cause **Human Review Report** (advice only, never executes) | LLM (reasoning) |
 
@@ -55,7 +55,7 @@ flowchart TD
     L3["3 · Pre-processing<br/>mesh · boundary conditions · build .inp"]
     L4["4 · Solve<br/>CalculiX ccx → beam.frd"]
     L5{"5 · Physics validation<br/>fast-fail gate"}
-    L6["6 · Post-processing<br/>.frd → .vtu → stress and displacement PNGs"]
+    L6["6 · Post-processing<br/>.frd → .vtu → stress and displacement PNGs + 3D view"]
     L7{"7 · Verification<br/>displacement vs PL³/3EI (5% tol)"}
     L8["8 · Diagnostics<br/>LLM Human Review Report — advice only"]
     OUT(["✓ Verified result + plots + reports"])
@@ -98,7 +98,7 @@ These are what make the system trustworthy — and are the core of its **AI‑sa
 - **Validation** — Pydantic v2.
 - **Geometry & mesh** — Gmsh (Python API), structured C3D20R hexahedra.
 - **Solver** — CalculiX `ccx`.
-- **Post‑processing** — ccx2paraview (`.frd → .vtu`), PyVista (off‑screen rendering).
+- **Post‑processing** — ccx2paraview (`.frd → .vtu`), PyVista (off‑screen rendering), Plotly (the dashboard's interactive 3D view).
 - **Retrieval (RAG)** — ChromaDB vector store + OpenRouter embeddings (`openai/text-embedding-3-small`) for reference‑case / knowledge‑note retrieval; a deterministic `applies()` gate makes the final pick.
 - **Dashboard** — Streamlit (a dark "control‑room" UI: live clarification chat + DEMO replay).
 - **Numerics** — NumPy. **Runtime** — Python 3.12 in a conda env.
@@ -138,7 +138,7 @@ python task_understanding.py --parameterize "an aluminium cantilever, 100mm, 10x
 bash run_all.sh --skip-checkpoints
 ```
 
-Outputs land in `out/`: `beam.{msh,inp,frd,vtu}`, the render set for the active geometry (`stress_{x,y,z}.png` for the beam, `stress_{xx,yy,xy,vm}.png` for the plate), `displacement.png`, `physics_report.txt`, `verification_report.txt`, and `diagnostic_report.txt` on failure.
+Outputs land in `out/`: `beam.{msh,inp,frd,vtu}`, the render set for the active geometry (`stress_{x,y,z}.png` for the beam, `stress_{xx,yy,xy,vm}.png` for the plate), `displacement.png`, `viewer.npz` (the interactive 3D view), `physics_report.txt`, `verification_report.txt`, and `diagnostic_report.txt` on failure.
 
 Either geometry can also be driven through the in‑process orchestrator the dashboard uses, skipping the two LLM layers and running the deterministic chain on prepared parameters — the same seam the batch runner uses:
 
@@ -180,7 +180,7 @@ Three recorded examples ship with it. The **plate** one is deliberately phrased 
 
 From that sentence the language layer resolves `aluminium → ALUMINUM` (E, ν, ρ then come from the curated library, never from the model), halves the **diameter** into the radius the schema wants (`r = 18`), converts **4.5 kN → 4500 N**, and reads *"right in the middle"* as a position it should leave unset so the centred default applies — reporting the centre it assumed, the 1 mm thickness it assumed and why, and the support model it applied, rather than applying any of them silently. The run then verifies at **0.551 %** against the Howland reference.
 
-A dark "control‑room" UI. A clarification chat resolves the request (asks for missing must‑haves, guards scope), then a clickable eight‑stage bar walks the run: the **left** panel is the action flow, the **right** panel holds the artifacts — an annotated mesh (FIXED/LOAD read straight from the `.inp`), stress/displacement plots, the RAG‑selected reference, and the acceptance reports. DEMO mode replays the snapshots in `demo/` — including the opening clarification dialogue — so it runs with no key and no solver:
+A dark "control‑room" UI. A clarification chat resolves the request (asks for missing must‑haves, guards scope), then a clickable eight‑stage bar walks the run: the **left** panel is the action flow, the **right** panel holds the artifacts — an annotated mesh (FIXED/LOAD read straight from the `.inp`), stress/displacement plots, the RAG‑selected reference, and the acceptance reports. Post‑processing leads with an **interactive 3D view**: the result field on the model with the real element edges drawn over it (a quadratic edge is drawn through its midside node, so the hole's edges are curved, not chorded), menus inside the figure for the field and the deformed shape, and the nodal value on hover. The fixed PNG views below it are drawn from the same data with the same edges, rainbow fringe and min–max range, so the bar of a field carries the same numbers in both. When the dashboard runs on your own machine and ParaView is installed, a live run also offers **open in ParaView**: it starts ParaView on the run's `.vtu` with the same field, colours, range and camera, and the deformed shape one click away — for slicing, probing and the solid's interior. DEMO mode replays the snapshots in `demo/` — including the opening clarification dialogue — so it runs with no key and no solver:
 `cantilever_pass` (verified against beam theory), `plate_pass` (the exchange above), and `stubby_fail` (a beam too stubby for the theory, where the diagnostics agent correctly blames the theory rather than the solver).
 
 ---
@@ -262,6 +262,8 @@ mesh.py · boundary_conditions.py · build_inp.py   # layer 3 — pre‑processi
 solve.sh                        # layer 4 — CalculiX
 physics_validation.py           # layer 5 — fast‑fail sanity gate
 postprocess.py                  # layer 6 — .vtu + PNG renders (PyVista)
+viewer.py                       # layer 6 — interactive 3D view: surface + element edges (Plotly)
+paraview_open.py                # open a run in ParaView, set up like the 3D view (local only)
 verification.py                 # layer 7 — RAG‑retrieved reference, deterministic error
 diagnostics.py                  # layer 8 — LLM root‑cause advisor (RAG‑augmented)
 batch_run.py                    # M10 — batch the design space, one manifest row per case
@@ -272,6 +274,7 @@ app.py                          # Streamlit dashboard (live chat + DEMO replay)
 pipeline_run.py                 # in‑process orchestrator behind the dashboard
 render_mesh.py                  # annotated mesh figure from the .inp (PyVista)
 record_demo.py · record_chat.py # record demo/ run snapshots + clarification threads
+                                #   (record_demo --refresh-renders redraws them, no LLM call)
 demo/                           # pre‑recorded runs + chat for DEMO_MODE (no key needed)
 .streamlit/                     # dashboard theme config
 llm_config.py · llm_check.py · check_env.py        # config & health checks
@@ -289,7 +292,7 @@ resolution in `export_field.py`, the SCF tolerance in `params.py`.
 **Delivered since the MVP:**
 
 - ✅ **Retrieval‑augmented reference selection** — semantic retrieval over a ChromaDB vector store (reference solutions, material notes, failure patterns); a deterministic `applies()` gate still makes the final pick and diagnostics is RAG‑augmented. The "agent retrieves, code decides" seam keeps the iron law intact (it gracefully falls back to a deterministic scan if retrieval is unavailable).
-- ✅ **Streamlit dashboard** — a dark "control‑room" front end: a clarification chat resolves the request, then a clickable eight‑stage walkthrough shows the action flow, annotated mesh, plots, the RAG‑selected reference and acceptance reports. Live mode runs the real pipeline; DEMO mode replays recorded snapshots with no key or solver.
+- ✅ **Streamlit dashboard** — a dark "control‑room" front end: a clarification chat resolves the request, then a clickable eight‑stage walkthrough shows the action flow, annotated mesh, an interactive 3D view of the result, plots, the RAG‑selected reference and acceptance reports. Live mode runs the real pipeline; DEMO mode replays recorded snapshots with no key or solver.
 - ✅ **Second geometry — 2D plane‑stress plate with a hole** — proving the architecture generalises rather than being one hard‑coded problem. Every layer dispatches on `geometry.type`, the naming contract and the iron laws are unchanged, and the plate flips *which* quantity is auto‑judged (stress, not displacement) because its physics differs. Both geometries run end to end from one `run_all.sh`.
 
 - ✅ **CNN stress‑field surrogate** — 545 cases batched over the `(r, xc, yc)` design space, exported to a regular grid, and used to train a UNet that predicts the field directly. Every case cleared the same physics gates before its field was allowed into the training set, and the held‑out sets were fixed at generation time so the out‑of‑distribution result means what it says.

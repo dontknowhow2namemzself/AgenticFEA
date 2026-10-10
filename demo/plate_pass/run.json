@@ -261,8 +261,13 @@
           "status": "pass"
         },
         {
-          "text": "Rendered \u03c3xx / \u03c3yy / \u03c3xy / vM (top view)",
-          "data": "diverging scale about zero \u00b7 warp \u00d791 auto",
+          "text": "Exported interactive 3D view",
+          "data": "7878 triangles \u00b7 2716 element edges",
+          "status": "pass"
+        },
+        {
+          "text": "Rendered \u03c3xx / \u03c3yy / \u03c3xy / vM (top view) + deformed",
+          "data": "same fringe, range and edges as the 3D view \u00b7 warp \u00d791.4 auto",
           "status": "pass"
         },
         {
@@ -280,14 +285,15 @@
           "S_Mises",
           "S_Principal",
           "RF",
-          "ERROR",
-          "U_magnitude",
-          "S_xx",
-          "S_yy",
-          "S_xy"
+          "ERROR"
         ]
       },
       "artifacts": [
+        {
+          "kind": "viewer3d",
+          "title": "interactive 3D",
+          "path": "demo/plate_pass/viewer.npz"
+        },
         {
           "kind": "views",
           "title": "field renders",
@@ -373,5 +379,6 @@
     "host": "M5 / 32GB arm64",
     "n_elem": 1313,
     "n_nodes": 4119
-  }
+  },
+  "workdir": "demo/plate_pass"
 }

@@ -104,5 +104,6 @@ if [ "$GEOM" = "plate_with_hole" ]; then
 else
   echo "      stress_x.png  stress_y.png  stress_z.png  displacement.png"
 fi
+echo "      viewer.npz  (interactive 3D view in the dashboard)"
 echo "      physics_report.txt  verification_report.txt"
 echo "=================================================================="

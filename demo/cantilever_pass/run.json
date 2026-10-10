@@ -256,8 +256,13 @@
           "status": "pass"
         },
         {
-          "text": "Rendered von Mises X / Y / Z",
-          "data": "PyVista off-screen",
+          "text": "Exported interactive 3D view",
+          "data": "6300 triangles \u00b7 2100 element edges",
+          "status": "pass"
+        },
+        {
+          "text": "Rendered von Mises end / side / top + deformed side",
+          "data": "same fringe, range and edges as the 3D view \u00b7 warp \u00d72.64 auto",
           "status": "pass"
         },
         {
@@ -275,11 +280,15 @@
           "S_Mises",
           "S_Principal",
           "RF",
-          "ERROR",
-          "U_magnitude"
+          "ERROR"
         ]
       },
       "artifacts": [
+        {
+          "kind": "viewer3d",
+          "title": "interactive 3D",
+          "path": "demo/cantilever_pass/viewer.npz"
+        },
         {
           "kind": "views",
           "title": "field renders",
@@ -362,5 +371,6 @@
     "host": "M5 / 32GB arm64",
     "n_elem": 1250,
     "n_nodes": 6696
-  }
+  },
+  "workdir": "demo/cantilever_pass"
 }
