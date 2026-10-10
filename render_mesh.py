@@ -26,8 +26,8 @@ from pathlib import Path
 import numpy as np
 import pyvista as pv
 
-HERE = Path(__file__).resolve().parent
-OUT = HERE / "out"
+from paths import RunPaths, add_workdir_argument, from_args
+
 pv.OFF_SCREEN = True
 
 # CalculiX element type -> (nodes per element, corner count, VTK cell type).
@@ -192,7 +192,9 @@ def _render_plate(nodes, blocks, nsets, cload, boundary, png) -> Path:
     return Path(png)
 
 
-def render_mesh(inp=OUT / "beam.inp", png=OUT / "mesh.png") -> Path:
+def render_mesh(paths: RunPaths = None) -> Path:
+    paths = paths or RunPaths.default()
+    inp, png = paths.inp, paths.mesh_png
     nodes, blocks, nsets, cload, boundary = parse_inp(inp)
     if any(k.startswith("CPS") for k in blocks):
         return _render_plate(nodes, blocks, nsets, cload, boundary, png)
@@ -257,5 +259,8 @@ def render_mesh(inp=OUT / "beam.inp", png=OUT / "mesh.png") -> Path:
 
 
 if __name__ == "__main__":
-    print("wrote", render_mesh())
+    import argparse
+    ap = argparse.ArgumentParser(description="Render the annotated mesh figure from the deck.")
+    add_workdir_argument(ap)
+    print("wrote", render_mesh(from_args(ap.parse_args())))
     sys.exit(0)

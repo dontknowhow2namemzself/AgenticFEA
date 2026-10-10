@@ -285,9 +285,15 @@ if not DEMO_MODE and st.session_state.phase == "ready" and st.session_state.run 
                                      for sid, lbl in defs]), unsafe_allow_html=True)
 
     _draw()
-    live_json = HERE / "out" / "live_run.json"
+    # Every live run gets its own directory. Two sessions at once -- two
+    # browser tabs on the same dashboard -- would otherwise overwrite each
+    # other's mesh, results and run record without any error.
+    from paths import RunPaths
+    run_paths = RunPaths.new_run()
+    live_json = run_paths.live_run_json
     proc = subprocess.Popen(
-        [sys.executable, str(HERE / "pipeline_run.py"), "--stream", "--out", str(live_json),
+        [sys.executable, str(HERE / "pipeline_run.py"), "--stream",
+         "--workdir", str(run_paths.root), "--out", str(live_json),
          st.session_state.completed],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(HERE))
     buf = []

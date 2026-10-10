@@ -39,12 +39,8 @@ import gmsh
 import numpy as np
 
 from params import PARAMS
+from paths import RunPaths, add_workdir_argument, from_args
 from schema import fixed_entry_at, fixed_entry_dofs, fixed_entry_face
-
-# Project-anchored paths (work regardless of the caller's CWD).
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "out"
-MSH_PATH = OUT_DIR / "beam.msh"
 
 RIGID_MODES_2D = ("Tx", "Ty", "Rz")
 RIGID_MODES_3D = ("Tx", "Ty", "Tz", "Rx", "Ry", "Rz")
@@ -167,13 +163,14 @@ def _rigid_body_check(constraints: list, node_xyz: dict, two_d: bool) -> dict:
             "ok": rank == m, "free_modes": free}
 
 
-def build_bc(params: dict, msh_path=MSH_PATH, verbose: bool = False) -> dict:
+def build_bc(params: dict, paths: RunPaths = None, verbose: bool = False) -> dict:
     """Map PARAMS.bc + mesh boundary labels into the constraint table and the
     FIXED / LOAD node sets.
 
     Returns a plain-data BC definition consumed by build_inp.py. Missing label
     references are recorded (not raised) so the acceptance report can flag them.
     """
+    msh_path = (paths or RunPaths.default()).msh
     if not Path(msh_path).exists():
         raise FileNotFoundError(f"{msh_path} not found; run mesh.py first")
 
@@ -299,8 +296,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Map BC labels -> constraints + FIXED/LOAD (plan 3.2 / plate M3).")
     parser.add_argument("-v", "--verbose", action="store_true", help="show Gmsh log output")
+    add_workdir_argument(parser)
     args = parser.parse_args()
-    bc_def = build_bc(PARAMS, verbose=args.verbose)
+    bc_def = build_bc(PARAMS, paths=from_args(args), verbose=args.verbose)
     return 0 if report_and_check(bc_def) else 1
 
 

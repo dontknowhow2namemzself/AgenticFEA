@@ -11,6 +11,10 @@ __pycache__/
 # OS
 .DS_Store
 
+# Machine-local preview config: it names this machine's interpreter by
+# absolute path, which is of no use to anyone else and leaks the home path.
+.claude/launch.json
+
 # Generated FEA artifacts (regenerable via run_all.sh).
 # Remove this line if you want to track meshes / results / PNGs in git.
 out/

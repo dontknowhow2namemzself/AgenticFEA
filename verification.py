@@ -35,21 +35,16 @@ Unit system: SI-mm; stress concentration factors are dimensionless.
 
 from __future__ import annotations
 
+import argparse
 import sys
-from pathlib import Path
 
 import numpy as np
 
 from boundary_conditions import build_bc
 from knowledge.reference_solutions import select_reference_case
 from params import PARAMS
+from paths import RunPaths, add_workdir_argument, from_args
 from physics_validation import _von_mises, parse_frd
-
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "out"
-FRD_PATH = OUT_DIR / "beam.frd"
-MSH_PATH = OUT_DIR / "beam.msh"
-REPORT_PATH = OUT_DIR / "verification_report.txt"
 
 STRESS_EXIT_REASONS = (
     "fixed-end stress concentration diverges under mesh refinement (not the section value Mc/I)",
@@ -130,20 +125,19 @@ def _select_reference(params: dict, use_rag: bool = True) -> tuple:
     return select_reference_case(params), "deterministic scan (retrieval disabled for batch)"
 
 
-def run_verification(params: dict, frd_path=FRD_PATH, msh_path=MSH_PATH,
-                     use_rag: bool = True) -> tuple:
+def run_verification(params: dict, paths: RunPaths = None, use_rag: bool = True) -> tuple:
     """Run the geometry's verification. Returns (overall_ok, judged, recorded, meta)."""
+    paths = paths or RunPaths.default()
     if params["geometry"]["type"] == "plate_with_hole":
-        return _verify_plate(params, frd_path=frd_path, msh_path=msh_path, use_rag=use_rag)
-    return _verify_beam(params, frd_path=frd_path, msh_path=msh_path, use_rag=use_rag)
+        return _verify_plate(params, paths, use_rag=use_rag)
+    return _verify_beam(params, paths, use_rag=use_rag)
 
 
-def _verify_plate(params: dict, frd_path=FRD_PATH, msh_path=MSH_PATH,
-                  use_rag: bool = True) -> tuple:
+def _verify_plate(params: dict, paths: RunPaths, use_rag: bool = True) -> tuple:
     """Plate: judge the stress-concentration factor, record displacement."""
     from boundary_conditions import _read_boundary_node_sets
 
-    frd = parse_frd(Path(frd_path))
+    frd = parse_frd(paths.frd)
     g = params["geometry"]["plate_with_hole"]
     a, b, t = float(g["a"]), float(g["b"]), float(g["t"])
     r, xc, yc = float(g["r"]), float(g["xc"]), float(g["yc"])
@@ -153,7 +147,7 @@ def _verify_plate(params: dict, frd_path=FRD_PATH, msh_path=MSH_PATH,
     # Hole nodes come from the MESH physical group: .frd coordinates are written
     # at E12.5 precision, so re-deriving "on the circle" from them would miss
     # most of the boundary nodes.
-    edge_sets = _read_boundary_node_sets(msh_path, 1)
+    edge_sets = _read_boundary_node_sets(paths.msh, 1)
     hole = edge_sets.get("hole_boundary", {})
     hole_ids = hole.get("node_ids", [])
     hole_xyz = hole.get("xyz", {})
@@ -188,22 +182,21 @@ def _verify_plate(params: dict, frd_path=FRD_PATH, msh_path=MSH_PATH,
                    "n_hole_nodes": len(vm_hole)})
 
     # Recorded, NOT judged: the plate's elongation has no closed form.
-    load_ids = build_bc(params, msh_path=msh_path)["load"]["node_ids"]
+    load_ids = build_bc(params, paths=paths)["load"]["node_ids"]
     ux = [float(frd["DISP"][n][0]) for n in load_ids if n in frd["DISP"]]
     recorded = {"mean_elongation": float(np.mean(ux)) if ux else float("nan"),
                 "max_vm_global": max(_von_mises(s) for s in frd["STRESS"].values())}
-    meta = {"frd": str(frd_path), "geom": "plate_with_hole",
+    meta = {"frd": str(paths.frd), "geom": "plate_with_hole",
             "model_line": (f"plate_with_hole a={a} b={b} t={t} mm, hole r={r} at "
                            f"({xc}, {yc}) mm | 2D plane stress | F={F} N")}
     overall_ok = judged["status"] != "FAIL"
     return overall_ok, judged, recorded, meta
 
 
-def _verify_beam(params: dict, frd_path=FRD_PATH, msh_path=MSH_PATH,
-                 use_rag: bool = True) -> tuple:
+def _verify_beam(params: dict, paths: RunPaths, use_rag: bool = True) -> tuple:
     """Cantilever: judge the tip deflection, record stress (plan section 7)."""
-    frd = parse_frd(Path(frd_path))
-    bc_def = build_bc(params, msh_path=msh_path)
+    frd = parse_frd(paths.frd)
+    bc_def = build_bc(params, paths=paths)
     load_nodes = bc_def["load"]["node_ids"]
     load_dir = np.asarray(bc_def["load"]["loads"][0]["dir_unit"], dtype=float)
 
@@ -230,7 +223,7 @@ def _verify_beam(params: dict, frd_path=FRD_PATH, msh_path=MSH_PATH,
         }
 
     stress = {"max_vm": max_vm}
-    meta = {"frd": str(frd_path), "geom": "cantilever_beam", "L": L, "h": h, "b": b,
+    meta = {"frd": str(paths.frd), "geom": "cantilever_beam", "L": L, "h": h, "b": b,
             "model_line": f"cantilever_beam | static | linear elastic | L={L} h={h} b={b} mm"}
     overall_ok = disp["status"] != "FAIL"   # PASS or N/A -> chain ok; FAIL -> diagnostics
     return overall_ok, disp, stress, meta
@@ -355,12 +348,14 @@ def _format_report(overall_ok: bool, disp: dict, stress: dict, meta: dict) -> st
 
 
 def main() -> int:
-    overall_ok, disp, stress, meta = run_verification(PARAMS)
+    ap = argparse.ArgumentParser(description="Numerical verification (plan layer 7).")
+    add_workdir_argument(ap)
+    paths = from_args(ap.parse_args())
+    overall_ok, disp, stress, meta = run_verification(PARAMS, paths=paths)
     report = _format_report(overall_ok, disp, stress, meta)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(report)
+    paths.verification_report.write_text(report)
     print(report, end="")
-    print(f"(written to {REPORT_PATH})")
+    print(f"(written to {paths.verification_report})")
     return 0 if overall_ok else 1
 
 

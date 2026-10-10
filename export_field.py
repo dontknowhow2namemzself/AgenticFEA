@@ -45,12 +45,8 @@ import gmsh
 import numpy as np
 import pyvista as pv
 
+from paths import RunPaths, add_workdir_argument, from_args
 from physics_validation import _von_mises, parse_frd
-
-HERE = Path(__file__).resolve().parent
-OUT = HERE / "out"
-MSH_PATH = OUT / "beam.msh"
-FRD_PATH = OUT / "beam.frd"
 
 # Canvas: a fixed physical window, so every case lands on the same pixel grid.
 CANVAS_MM = (200.0, 100.0)     # x, y extent covered by the grid
@@ -84,8 +80,10 @@ _VTK_2D = {
 }
 
 
-def fe_grid(msh_path=MSH_PATH, frd_path=FRD_PATH) -> pv.UnstructuredGrid:
+def fe_grid(paths: RunPaths = None) -> pv.UnstructuredGrid:
     """The solved mesh as a PyVista grid carrying the nodal stress tensor."""
+    paths = paths or RunPaths.default()
+    msh_path, frd_path = paths.msh, paths.frd
     own = not gmsh.isInitialized()
     if own:
         gmsh.initialize()
@@ -122,8 +120,8 @@ def fe_grid(msh_path=MSH_PATH, frd_path=FRD_PATH) -> pv.UnstructuredGrid:
     return grid
 
 
-def export_case(params: dict, shape=DEFAULT_SHAPE, msh_path=MSH_PATH,
-                frd_path=FRD_PATH, npz_path=None) -> dict:
+def export_case(params: dict, shape=DEFAULT_SHAPE, paths: RunPaths = None,
+                npz_path=None) -> dict:
     """Sample one solved case onto the regular grid. Returns the arrays + meta."""
     g = params["geometry"]["plate_with_hole"]
     a, b, t = float(g["a"]), float(g["b"]), float(g["t"])
@@ -144,7 +142,7 @@ def export_case(params: dict, shape=DEFAULT_SHAPE, msh_path=MSH_PATH,
     mask = ((sdf > 0) & inside_plate).astype(np.uint8)
 
     # Stress channels: VTK cell-based sampling on the quadratic elements.
-    grid = fe_grid(msh_path, frd_path)
+    grid = fe_grid(paths)
     probe = pv.ImageData(dimensions=(nx, ny, 1), spacing=(dx, dy, 1.0),
                          origin=(0.5 * dx, 0.5 * dy, 0.0))
     sampled = probe.sample(grid)
@@ -193,7 +191,8 @@ def export_case(params: dict, shape=DEFAULT_SHAPE, msh_path=MSH_PATH,
             "npz_path": str(npz_path) if npz_path else ""}
 
 
-def resolution_study(params: dict, shapes=((128, 64), (256, 128), (384, 192), (512, 256))) -> list:
+def resolution_study(params: dict, shapes=((128, 64), (256, 128), (384, 192), (512, 256)),
+                     paths: RunPaths = None) -> list:
     """How much of the peak does each grid resolution keep?
 
     The export is an interpolation, and interpolation smooths peaks. The peak IS
@@ -203,7 +202,7 @@ def resolution_study(params: dict, shapes=((128, 64), (256, 128), (384, 192), (5
     g = params["geometry"]["plate_with_hole"]
     rows = []
     for shape in shapes:
-        res = export_case(params, shape=shape)
+        res = export_case(params, shape=shape, paths=paths)
         px = CANVAS_MM[0] / shape[0]
         rows.append({
             "shape": shape, "mm_per_px": px,
@@ -225,7 +224,9 @@ def main() -> int:
                     help="measure how much peak stress each grid resolution keeps")
     ap.add_argument("--case", default=None,
                     help="use a prepared case from params.CASES instead of the active PARAMS")
+    add_workdir_argument(ap)
     args = ap.parse_args()
+    paths = from_args(args)
     from params import CASES, PARAMS
 
     PARAMS = CASES[args.case] if args.case else PARAMS
@@ -235,13 +236,13 @@ def main() -> int:
     if args.resolution_study:
         print(f"{'grid':>12} {'mm/px':>7} {'hole px':>8} {'vM grid':>9} {'vM FE':>9} "
               f"{'peak lost':>10} {'material px':>12} {'MB/case':>8}")
-        for row in resolution_study(PARAMS):
+        for row in resolution_study(PARAMS, paths=paths):
             print(f"{str(row['shape']):>12} {row['mm_per_px']:7.3f} {row['hole_px']:8.1f} "
                   f"{row['vm_max_grid']:9.3f} {row['vm_max_fe']:9.3f} "
                   f"{row['peak_loss_pct']:9.2f}% {row['n_material_px']:12d} {row['mb']:8.2f}")
         return 0
 
-    res = export_case(PARAMS, shape=(args.nx, args.ny), npz_path=args.npz)
+    res = export_case(PARAMS, shape=(args.nx, args.ny), paths=paths, npz_path=args.npz)
     print(f"grid {res['shape']}  material pixels {res['n_material_px']}  "
           f"peak vM grid {res['vm_max_grid']:.3f} vs FE {res['vm_max_fe']:.3f} MPa")
     if args.npz:
