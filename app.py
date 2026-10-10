@@ -25,7 +25,9 @@ from pathlib import Path
 
 import streamlit as st
 
+import paraview_open
 import viewer
+from paths import RunPaths
 
 HERE = Path(__file__).resolve().parent
 DEMO_DIR = HERE / "demo"
@@ -296,7 +298,6 @@ if not DEMO_MODE and st.session_state.phase == "ready" and st.session_state.run 
     # Every live run gets its own directory. Two sessions at once -- two
     # browser tabs on the same dashboard -- would otherwise overwrite each
     # other's mesh, results and run record without any error.
-    from paths import RunPaths
     run_paths = RunPaths.new_run()
     live_json = run_paths.live_run_json
     proc = subprocess.Popen(
@@ -433,6 +434,17 @@ def render_artifact(a: dict):
             return
         st.plotly_chart(_viewer_figure(str(p), p.stat().st_mtime), theme=None, width="stretch",
                         config=viewer.PLOTLY_CONFIG, key=f"vfig_{p}")
+        # Local only: offered when the browser is on this machine, ParaView is
+        # installed here and the run kept its .vtu (see paraview_open).
+        exe = paraview_open.available(p.parent, st.context.ip_address)
+        if exe and st.button(f"open in {paraview_open.paraview_name(exe)}", key=f"pv_{p}",
+                             help="Starts ParaView on this machine with this run's .vtu, "
+                                  "set up like the view above."):
+            try:
+                paraview_open.launch(RunPaths(p.parent), exe)
+                st.toast(f"{paraview_open.paraview_name(exe)} is starting with this run")
+            except OSError as exc:
+                st.error(f"could not start ParaView: {exc}")
     elif kind == "code":
         st.code(a.get("text", ""), language="text")
     elif kind == "panel":
