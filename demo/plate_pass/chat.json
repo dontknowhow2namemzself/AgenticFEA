@@ -1,0 +1,18 @@
+[
+  {
+    "role": "user",
+    "text": "I'd like to check an aluminium plate that has a hole in it."
+  },
+  {
+    "role": "agent",
+    "text": "I still need the following before I can proceed:\n  - geometry: plate length a and width b, and hole radius r, in mm (e.g. 200 x 100 plate with a 20 mm radius hole)\n  - load: total tensile force in N (e.g. 1000 N pulling the plate)\nPlease provide them in a single reply: "
+  },
+  {
+    "role": "user",
+    "text": "It's 240 by 120 mm with a 36 mm diameter hole right in the middle, and it's pulled with 4.5 kN."
+  },
+  {
+    "role": "agent",
+    "text": "✓ Understood — assumed plate thickness t = 1.0 mm [plane stress; stress scales as F/t, so t is a free unit choice]; hole centred at (120, 60) mm [the Kirsch/Howland reference configuration]…. Running the pipeline…"
+  }
+]

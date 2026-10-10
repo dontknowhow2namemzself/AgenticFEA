@@ -24,6 +24,10 @@ done
 mkdir -p "$OUT"
 cd "$ROOT"
 
+# The active geometry (params.ACTIVE_CASE) decides which renders the run
+# produces, so the closing summary asks params.py rather than assuming a beam.
+GEOM="$("$PY" -c 'from params import PARAMS; print(PARAMS["geometry"]["type"])' 2>/dev/null || echo unknown)"
+
 step()       { echo; echo "########## $1 ##########"; }
 checkpoint() {  # $1 = what to inspect
   if [ "$SKIP" -eq 1 ]; then
@@ -80,8 +84,13 @@ fi
 
 echo
 echo "=================================================================="
-echo "PIPELINE COMPLETE: all stages PASSED."
+echo "PIPELINE COMPLETE: all stages PASSED.   (geometry: $GEOM)"
 echo "out/: beam.msh  beam.inp  beam.frd  beam.vtu"
-echo "      stress_x.png  stress_y.png  stress_z.png  displacement.png"
+if [ "$GEOM" = "plate_with_hole" ]; then
+  echo "      stress_xx.png  stress_yy.png  stress_xy.png  stress_vm.png"
+  echo "      displacement.png  mesh.png"
+else
+  echo "      stress_x.png  stress_y.png  stress_z.png  displacement.png"
+fi
 echo "      physics_report.txt  verification_report.txt"
 echo "=================================================================="

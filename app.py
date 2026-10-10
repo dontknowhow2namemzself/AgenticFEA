@@ -181,8 +181,18 @@ def _branch(accum: str):
     if not a.in_scope:
         st.session_state.chat.append(("agent",
             f"That's beyond what I can model yet — {a.scope_note or 'unsupported configuration'}. "
-            "I currently handle a cantilever: one end fixed, a single transverse point load at the "
-            "FREE END. Want to try that instead?"))
+            "I handle two geometries: a cantilever beam (one end fixed, a single transverse "
+            "point load at the free end), and a flat plate with one circular hole pulled in "
+            "tension. Want to try one of those?"))
+        st.session_state.accum = ""
+        return
+    impossible = tu.geometry_impossible(a)
+    if impossible:
+        # Reported, never repaired. Adjusting the user's numbers to make the
+        # geometry valid would answer a different question than the one asked.
+        st.session_state.chat.append(("agent",
+            f"That geometry cannot exist as described — {impossible}\n\n"
+            "Tell me corrected numbers and I will run it."))
         st.session_state.accum = ""
         return
     gaps = tu.must_have_gaps(a)
@@ -377,12 +387,25 @@ def render_artifact(a: dict):
         else:
             st.caption("(no image)")
     elif kind == "views":
-        labels = {"z": "σ · Z (top)", "y": "σ · Y (side)", "x": "σ · X (section)", "disp": "displacement"}
-        choice = st.radio("view", list(labels.values()), horizontal=True, label_visibility="collapsed")
-        key = [k for k, v in labels.items() if v == choice][0]
-        p = Path(_img(a["views"][key]))
-        if p.exists():
-            st.image(_img(a["views"][key]), use_container_width=True)
+        # The options come from the artifact itself, not from a fixed list: the
+        # two geometries render different things (a 3D solid is shown from three
+        # camera directions, a flat plate as its stress components in one top
+        # view), so hard-coding one geometry's keys makes the other one crash.
+        views = a.get("views", {})
+        pretty = {"z": "σ · Z (top)", "y": "σ · Y (side)", "x": "σ · X (section)",
+                  "disp": "displacement"}
+        keys = list(views)
+        labels = [pretty.get(k, k) for k in keys]
+        if not keys:
+            st.caption("(no views)")
+            return
+        # Keying on the option set keeps a previous geometry's selection from
+        # leaking in when the user switches demos.
+        choice = st.radio("view", labels, horizontal=True, label_visibility="collapsed",
+                          key="views_" + "_".join(keys))
+        src = views[keys[labels.index(choice)]]
+        if Path(_img(src)).exists():
+            st.image(_img(src), use_container_width=True)
         else:
             st.caption("(no image)")
     elif kind == "code":

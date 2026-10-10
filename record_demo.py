@@ -25,10 +25,31 @@ OUT = HERE / "out"
 EXAMPLES = {
     "stubby_fail": ("A steel cantilever beam 20 mm long, 10x10 mm square section, "
                     "fixed at one end, with a 1000 N downward load at the free end."),
+    # Phrased the way someone would actually say it: a diameter rather than a
+    # radius, kN rather than N, a material spelling the library has to
+    # canonicalise, and no thickness or support description at all. The run
+    # therefore demonstrates not only that the plate solves, but that the
+    # language layer read it correctly and disclosed what it assumed.
+    "plate_pass": ("An aluminium plate 240 by 120 mm with a 36 mm diameter hole "
+                   "right in the middle, pulled with 4.5 kN."),
     "cantilever_pass": ("A steel cantilever beam 100 mm long, 10x10 mm square section, "
                         "fixed at one end, with a 1000 N downward load at the free end."),
 }
-ARTIFACT_FILES = ["mesh.png", "stress_x.png", "stress_y.png", "stress_z.png", "displacement.png"]
+def _artifact_names(rec: dict) -> list:
+    """The image files THIS run actually referenced.
+
+    Copying everything that happens to sit in out/ would drag the previous
+    example's renders into this one's folder -- the two geometries write
+    different filenames, so nothing overwrites and the strays just accumulate.
+    Reading the names off the record keeps each snapshot to its own run.
+    """
+    names = []
+    for stage in rec["stages"]:
+        for a in stage.get("artifacts", []):
+            if "path" in a:
+                names.append(Path(a["path"]).name)
+            names += [Path(v).name for v in a.get("views", {}).values()]
+    return sorted(set(names))
 
 
 def _rewrite_paths(rec: dict, name: str) -> None:
@@ -44,8 +65,11 @@ def _rewrite_paths(rec: dict, name: str) -> None:
 def snapshot(name: str, description: str) -> None:
     rec = pipeline_run.run_pipeline(description, run_id=name)
     dst = DEMO / name
+    if dst.exists():
+        for stale in dst.glob("*.png"):      # a re-record must not keep old renders
+            stale.unlink()
     dst.mkdir(parents=True, exist_ok=True)
-    for f in ARTIFACT_FILES:
+    for f in _artifact_names(rec):
         if (OUT / f).exists():
             shutil.copy(OUT / f, dst / f)
     _rewrite_paths(rec, name)
