@@ -29,9 +29,9 @@ import render_mesh
 import task_understanding
 import verification
 from boundary_conditions import build_bc
+from paths import RunPaths
 
 HERE = Path(__file__).resolve().parent
-OUT = HERE / "out"
 
 
 def _read(p) -> str:
@@ -39,8 +39,8 @@ def _read(p) -> str:
     return p.read_text() if p.exists() else ""
 
 
-def _inp_excerpt() -> str:
-    lines = _read(OUT / "beam.inp").splitlines()
+def _inp_excerpt(paths: RunPaths) -> str:
+    lines = _read(paths.inp).splitlines()
     if not lines:
         return ""
     out = lines[:7]                                   # header + *NODE + first nodes
@@ -55,9 +55,9 @@ def _inp_excerpt() -> str:
     return "\n".join(out)
 
 
-def _diagnose(stage: str, params: dict) -> dict:
+def _diagnose(stage: str, params: dict, paths: RunPaths) -> dict:
     try:
-        d = diagnostics.diagnose(diagnostics.gather_context(stage, params=params))
+        d = diagnostics.diagnose(diagnostics.gather_context(stage, params=params, paths=paths))
         out = d.model_dump()
         out["report"] = diagnostics.format_report(stage, d)
         return out
@@ -71,7 +71,7 @@ STAGE_ORDER = ["understand", "parameterize", "preprocess", "solve", "physics", "
 
 
 def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit=None,
-                 params: dict = None) -> dict:
+                 params: dict = None, paths: RunPaths = None) -> dict:
     """Run the pipeline and return the dashboard's run record.
 
     `params` skips layers 1-2 and runs the deterministic chain on a prepared
@@ -79,10 +79,15 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
     front end is not taught yet (the plate -- see plate plan M13), and the batch
     runner (M10), which samples parameters directly and must never spend an LLM
     call per case.
+
+    `paths` is the run's own directory. The dashboard passes a fresh one per run
+    so that two runs at once cannot overwrite each other; left out, the run uses
+    the shared out/ directory exactly as before.
     """
+    paths = (paths or RunPaths.default()).ensure()
     emit = emit or (lambda *a: None)   # emit(stage_id, phase) for live progress
     rec = {"run_id": run_id, "description": description, "status": "complete", "verdict": "—",
-           "stages": [], "diagnosis": None,
+           "stages": [], "diagnosis": None, "workdir": str(paths.root),
            "meta": {"solver": "CalculiX ccx · SPOOLES", "units": "SI-mm", "host": "M5 / 32GB arm64"}}
 
     def stage(**kw):
@@ -109,7 +114,7 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
                   artifacts=[{"kind": "code", "title": "params (prepared)",
                               "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False,
                                                                    width=78)}] if sid == "parameterize" else [])
-        return _run_deterministic_chain(params, rec, stage, warp)
+        return _run_deterministic_chain(params, rec, stage, warp, paths)
 
     # 1 -- task understanding
     t = time.time()
@@ -146,7 +151,7 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
           artifacts=[{"kind": "code", "title": "params.py (validated)",
                       "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False, width=78)}])
 
-    return _run_deterministic_chain(params, rec, stage, warp)
+    return _run_deterministic_chain(params, rec, stage, warp, paths)
 
 
 def _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes) -> tuple:
@@ -192,29 +197,33 @@ def _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes) -> tuple:
     return actions, data
 
 
-def _run_deterministic_chain(params: dict, rec: dict, stage, warp) -> dict:
-    """Layers 3-7: pre-process -> solve -> physics -> post -> verify."""
+def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPaths) -> dict:
+    """Layers 3-7: pre-process -> solve -> physics -> post -> verify, all inside
+    one run directory."""
     is_plate = params["geometry"]["type"] == "plate_with_hole"
 
     # 3 -- pre-processing (mesh + BC + inp)
-    msh = mesh.build_mesh(params); bc = build_bc(params); inp = build_inp.build_inp(params)
+    msh = mesh.build_mesh(params, paths=paths)
+    bc = build_bc(params, paths=paths)
+    inp = build_inp.build_inp(params, paths=paths)
     n_elem, n_nodes = inp["n_elems"], inp["n_nodes"]
     rec["meta"]["n_elem"], rec["meta"]["n_nodes"] = n_elem, n_nodes
     try:
-        render_mesh.render_mesh()        # beam.inp now exists -> mesh.png (decoupled from solve)
+        render_mesh.render_mesh(paths)   # beam.inp now exists -> mesh.png (decoupled from solve)
     except Exception:  # noqa: BLE001
         pass
     pre_actions, pre_data = _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes)
     stage(id="preprocess", label="Pre-Process", status="pass", detail=f"{n_elem} elem",
           actions=pre_actions, data=pre_data,
-          artifacts=[{"kind": "image", "title": "mesh", "path": str(OUT / "mesh.png")},
-                     {"kind": "code", "title": "beam.inp (excerpt)", "text": _inp_excerpt()}])
+          artifacts=[{"kind": "image", "title": "mesh", "path": str(paths.mesh_png)},
+                     {"kind": "code", "title": "beam.inp (excerpt)", "text": _inp_excerpt(paths)}])
 
     # 4 -- solve
     t = time.time()
-    sp = subprocess.run(["bash", str(HERE / "solve.sh")], capture_output=True, text=True)
+    sp = subprocess.run(["bash", str(HERE / "solve.sh"), str(paths.root)],
+                        capture_output=True, text=True)
     dt = round(time.time() - t, 1)
-    log = _read(OUT / "ccx.log")
+    log = _read(paths.ccx_log)
     solved = sp.returncode == 0 and "Job finished" in log
     stage(id="solve", label="Solve", status="pass" if solved else "fail", detail=f"{dt}s",
           actions=[{"text": "Ran CalculiX ccx", "data": "OMP_NUM_THREADS=4 (M5 P-cores)", "status": "pass" if solved else "fail"},
@@ -225,13 +234,13 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp) -> dict:
           report=log)
     if not solved:
         rec["status"], rec["verdict"] = "failed", "FAIL"
-        rec["diagnosis"] = _diagnose("solve", params)
+        rec["diagnosis"] = _diagnose("solve", params, paths)
         return rec
 
     # 5 -- physics validation (fast-fail gate)
-    ppass, checks, pinfo = physics_validation.run_physics_validation(params)
+    ppass, checks, pinfo = physics_validation.run_physics_validation(params, paths=paths)
     phys_text = physics_validation._format_report(ppass, checks, pinfo)
-    (OUT / "physics_report.txt").write_text(phys_text)   # fresh report for diagnosis + expander
+    paths.physics_report.write_text(phys_text)   # fresh report for diagnosis + expander
     n_pass = sum(1 for c in checks if c.status == "PASS")
     stage(id="physics", label="Physics", status="pass" if ppass else "fail", detail=f"{n_pass}/{len(checks)}",
           actions=[{"text": c.name.replace("_", " "), "data": c.message,
@@ -242,21 +251,21 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp) -> dict:
           report=phys_text)
     if not ppass:
         rec["status"], rec["verdict"] = "failed", "FAIL"
-        rec["diagnosis"] = _diagnose("physics", params)
+        rec["diagnosis"] = _diagnose("physics", params, paths)
         return rec
 
     # 6 -- post-processing
-    post = postprocess.run_postprocess(warp_factor=warp, params=params)
+    post = postprocess.run_postprocess(warp_factor=warp, params=params, paths=paths)
     if is_plate:
-        views = {"vM": str(OUT / "stress_vm.png"), "σxx": str(OUT / "stress_xx.png"),
-                 "σyy": str(OUT / "stress_yy.png"), "σxy": str(OUT / "stress_xy.png"),
-                 "disp": str(OUT / "displacement.png")}
+        views = {"vM": str(paths.plate_png("stress_vm")), "σxx": str(paths.plate_png("stress_xx")),
+                 "σyy": str(paths.plate_png("stress_yy")), "σxy": str(paths.plate_png("stress_xy")),
+                 "disp": str(paths.displacement_png)}
         render_note = ("Rendered σxx / σyy / σxy / vM (top view)",
                        f"diverging scale about zero · warp ×{post['warp_factor']:.0f} auto")
         detail = "5 fields"
     else:
-        views = {"z": str(OUT / "stress_z.png"), "y": str(OUT / "stress_y.png"),
-                 "x": str(OUT / "stress_x.png"), "disp": str(OUT / "displacement.png")}
+        views = {"z": str(paths.beam_stress_png("z")), "y": str(paths.beam_stress_png("y")),
+                 "x": str(paths.beam_stress_png("x")), "disp": str(paths.displacement_png)}
         render_note = ("Rendered von Mises X / Y / Z", "PyVista off-screen")
         detail = "3 views"
     stage(id="postprocess", label="Post-Process", status="pass", detail=detail,
@@ -271,9 +280,9 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp) -> dict:
     # 7 -- numerical verification. Which quantity is judged depends on the
     # geometry (plate plan D3): the beam judges displacement, the plate judges
     # the stress concentration factor.
-    vok, judged, recorded, meta = verification.run_verification(params)
+    vok, judged, recorded, meta = verification.run_verification(params, paths=paths)
     verify_text = verification._format_report(vok, judged, recorded, meta)
-    (OUT / "verification_report.txt").write_text(verify_text)   # fresh report for diagnosis + expander
+    paths.verification_report.write_text(verify_text)   # fresh report for diagnosis + expander
     verdict = judged["status"]; rec["verdict"] = verdict
     kb = judged["case"].id if judged.get("case") else None
     if is_plate:
@@ -311,7 +320,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp) -> dict:
           report=verify_text)
     if verdict == "FAIL":
         rec["status"] = "failed"
-        rec["diagnosis"] = _diagnose("verification", params)
+        rec["diagnosis"] = _diagnose("verification", params, paths)
     else:
         rec["status"] = "complete"
     return rec
@@ -331,7 +340,13 @@ if __name__ == "__main__":
     ap.add_argument("--case", default=None,
                     help="run a prepared case from params.CASES (skips the LLM layers), "
                          "e.g. --case plate_with_hole")
+    where = ap.add_mutually_exclusive_group()
+    where.add_argument("--workdir", default=None, metavar="DIR",
+                       help="run directory to write into (default: out/)")
+    where.add_argument("--new-run", action="store_true",
+                       help="create a fresh isolated directory under out/runs/ for this run")
     args = ap.parse_args()
+    run_paths = RunPaths.new_run() if args.new_run else RunPaths.at(args.workdir)
 
     prepared = None
     if args.case:
@@ -341,12 +356,13 @@ if __name__ == "__main__":
         prepared = CASES[args.case]
 
     emit = (lambda sid, ph: print(f"@@ {sid} {ph}", flush=True)) if args.stream else None
-    r = run_pipeline(args.description, run_id=args.run_id, emit=emit, params=prepared)
+    r = run_pipeline(args.description, run_id=args.run_id, emit=emit, params=prepared,
+                     paths=run_paths)
     if args.out:
         Path(args.out).write_text(json.dumps(r, default=str))
         print(f"wrote {args.out}  (status={r['status']} verdict={r['verdict']})")
     else:
-        print(f"status={r['status']} verdict={r['verdict']}")
+        print(f"status={r['status']} verdict={r['verdict']}   workdir={r['workdir']}")
         for s in r["stages"]:
             print(f"  [{s['status']:>5}] {s['label']:<13} {s['detail']}")
         if r["diagnosis"]:

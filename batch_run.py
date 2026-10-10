@@ -60,9 +60,12 @@ import postprocess
 import verification
 from boundary_conditions import build_bc
 from params import CASES
+from paths import RunPaths
 
 HERE = Path(__file__).resolve().parent
-OUT = HERE / "out"
+# Cases are solved one at a time in the shared default run directory and their
+# files copied out afterwards, so a batch behaves exactly as it always has.
+OUT = RunPaths.default().root
 DEFAULT_ROOT = OUT / "cases"
 
 # Design space (plate plan M10). The plate itself is fixed; only the hole moves.
@@ -238,7 +241,7 @@ def run_case(params: dict, case_dir: Path, render: bool = False,
             raise RuntimeError("inp gates failed")
 
         # --- 4 solve ---
-        sp = subprocess.run(["bash", str(HERE / "solve.sh")],
+        sp = subprocess.run(["bash", str(HERE / "solve.sh"), str(OUT)],
                             capture_output=True, text=True, cwd=str(HERE))
         row["ccx_rc"] = sp.returncode
         row["solve_ok"] = sp.returncode == 0

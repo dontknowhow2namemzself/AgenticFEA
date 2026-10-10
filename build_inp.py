@@ -41,11 +41,7 @@ import numpy as np
 
 from boundary_conditions import build_bc
 from params import PARAMS
-
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "out"
-MSH_PATH = OUT_DIR / "beam.msh"
-INP_PATH = OUT_DIR / "beam.inp"
+from paths import RunPaths, add_workdir_argument, from_args
 
 GMSH_HEX20 = 17  # Gmsh element type id for the 20-node hexahedron.
 GMSH_QUAD8 = 16  # Gmsh element type id for the 8-node quadrangle -> CPS8R.
@@ -233,24 +229,25 @@ def _ints_to_lines(ints: list, per_line: int = 16) -> list:
     return lines
 
 
-def build_inp(params: dict, msh_path=MSH_PATH, inp_path=INP_PATH, verbose: bool = False) -> dict:
-    """Assemble out/beam.inp for the active geometry. Returns a summary."""
-    if not Path(msh_path).exists():
-        raise FileNotFoundError(f"{msh_path} not found; run mesh.py first")
+def build_inp(params: dict, paths: RunPaths = None, verbose: bool = False) -> dict:
+    """Assemble <run>/beam.inp for the active geometry. Returns a summary."""
+    paths = paths or RunPaths.default()
+    if not paths.msh.exists():
+        raise FileNotFoundError(f"{paths.msh} not found; run mesh.py first")
     if params["geometry"]["type"] == "plate_with_hole":
-        return _build_plate_inp(params, msh_path=msh_path, inp_path=inp_path, verbose=verbose)
-    return _build_beam_inp(params, msh_path=msh_path, inp_path=inp_path, verbose=verbose)
+        return _build_plate_inp(params, paths, verbose=verbose)
+    return _build_beam_inp(params, paths, verbose=verbose)
 
 
-def _build_beam_inp(params: dict, msh_path=MSH_PATH, inp_path=INP_PATH,
-                    verbose: bool = False) -> dict:
+def _build_beam_inp(params: dict, paths: RunPaths, verbose: bool = False) -> dict:
     """Cantilever deck: C3D20R volume elements, full clamp, equal nodal split."""
+    msh_path, inp_path = paths.msh, paths.inp
     g = params["geometry"]["cantilever_beam"]
     L, h, b = float(g["L"]), float(g["h"]), float(g["b"])
     mat = params["material"]
 
     # 1. BC node sets (build_bc runs its own gmsh session and finalizes it).
-    bc_def = build_bc(params, msh_path=msh_path, verbose=verbose)
+    bc_def = build_bc(params, paths=paths, verbose=verbose)
 
     # 2. Our gmsh session: derive remap, read nodes + volume elements.
     own = not gmsh.isInitialized()
@@ -358,8 +355,7 @@ def _build_beam_inp(params: dict, msh_path=MSH_PATH, inp_path=INP_PATH,
     lines.append("*END STEP")
 
     inp_text = "\n".join(lines) + "\n"
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    inp_path = Path(inp_path)
+    inp_path.parent.mkdir(parents=True, exist_ok=True)
     inp_path.write_text(inp_text)
 
     return {
@@ -406,17 +402,17 @@ def _read_edge_line_elements(label_tags: dict, label: str) -> list:
     return out
 
 
-def _build_plate_inp(params: dict, msh_path=MSH_PATH, inp_path=INP_PATH,
-                     verbose: bool = False) -> dict:
+def _build_plate_inp(params: dict, paths: RunPaths, verbose: bool = False) -> dict:
     """Plane-stress plate deck: CPS8R/CPS6, thickness, per-dof *BOUNDARY,
     consistent edge loads (plate plan M4)."""
+    msh_path, inp_path = paths.msh, paths.inp
     g = params["geometry"]["plate_with_hole"]
     a, b, t = float(g["a"]), float(g["b"]), float(g["t"])
     r, xc, yc = float(g["r"]), float(g["xc"]), float(g["yc"])
     mat = params["material"]
 
     # 1. Constraint table + LOAD sets (build_bc runs its own gmsh session).
-    bc_def = build_bc(params, msh_path=msh_path, verbose=verbose)
+    bc_def = build_bc(params, paths=paths, verbose=verbose)
 
     # 2. Our gmsh session: derive remaps, read nodes / surface / edge elements.
     own = not gmsh.isInitialized()
@@ -557,8 +553,7 @@ def _build_plate_inp(params: dict, msh_path=MSH_PATH, inp_path=INP_PATH,
     lines.append("*END STEP")
 
     inp_text = "\n".join(lines) + "\n"
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    inp_path = Path(inp_path)
+    inp_path.parent.mkdir(parents=True, exist_ok=True)
     inp_path.write_text(inp_text)
 
     elem_type_counts = {_2D_FAMILY[gt][0]: len(v) for gt, v in by_type.items()}
@@ -656,7 +651,7 @@ def _report_plate(s: dict) -> bool:
     print("-" * 64)
     print(f"ACCEPTANCE: {'PASS' if passed else 'FAIL'}")
     if passed:
-        print("Next: solve with ccx (layer 4 / plate M5).  Human check: head out/beam.inp")
+        print(f"Next: solve with ccx (layer 4 / plate M5).  Human check: head {s['inp_path']}")
     print("=" * 64)
     return passed
 
@@ -706,7 +701,7 @@ def _report_beam(s: dict) -> bool:
     print("-" * 64)
     print(f"ACCEPTANCE: {'PASS' if passed else 'FAIL'}")
     if passed:
-        print("Next: solve with ccx (layer 4).  Human check (optional): head out/beam.inp")
+        print(f"Next: solve with ccx (layer 4).  Human check (optional): head {s['inp_path']}")
     print("=" * 64)
     return passed
 
@@ -714,8 +709,9 @@ def _report_beam(s: dict) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate CalculiX .inp (plan layer 3.4).")
     parser.add_argument("-v", "--verbose", action="store_true", help="show Gmsh log output")
+    add_workdir_argument(parser)
     args = parser.parse_args()
-    summary = build_inp(PARAMS, verbose=args.verbose)
+    summary = build_inp(PARAMS, paths=from_args(args), verbose=args.verbose)
     return 0 if report_and_check(summary) else 1
 
 

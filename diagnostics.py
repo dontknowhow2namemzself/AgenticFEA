@@ -24,18 +24,17 @@ from typing import Literal
 from pydantic import BaseModel
 
 import llm_config
-
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "out"
-REPORT_PATH = OUT_DIR / "diagnostic_report.txt"
+from paths import RunPaths, add_workdir_argument, from_args
 
 STAGES = ("mesh", "bc", "inp", "solve", "physics", "postprocess", "verification")
 
 # Reports to fold into the context, by stage (the stage log is always included).
+# Values are RunPaths attributes, so the file is read from the failed run's own
+# directory -- never from whichever run happened to write out/ last.
 STAGE_REPORTS = {
-    "solve": ["ccx.log"],
-    "physics": ["physics_report.txt"],
-    "verification": ["verification_report.txt"],
+    "solve": ["ccx_log"],
+    "physics": ["physics_report"],
+    "verification": ["verification_report"],
 }
 
 FAILURE_TAXONOMY = """Failure classes (use as guidance for failure_class):
@@ -109,22 +108,23 @@ def _retrieve_knowledge(query: str, k: int = 3) -> str:
     )
 
 
-def gather_context(stage: str, log_path=None, params=None) -> str:
+def gather_context(stage: str, log_path=None, params=None, paths: RunPaths = None) -> str:
     """Assemble the failure context, augmented with semantically-retrieved knowledge."""
+    paths = paths or RunPaths.default()
     parts = [f"FAILED STAGE: {stage}", "", "PARAMS (metadata):", _params_summary(params), ""]
 
     log_text = ""
     if log_path and Path(log_path).exists():
         log_text = Path(log_path).read_text()
-    elif stage == "solve" and (OUT_DIR / "ccx.log").exists():
-        log_text = (OUT_DIR / "ccx.log").read_text()
+    elif stage == "solve" and paths.ccx_log.exists():
+        log_text = paths.ccx_log.read_text()
     if log_text.strip():
         parts += ["STAGE LOG (tail):", _tail(log_text), ""]
 
-    for fname in STAGE_REPORTS.get(stage, []):
-        p = OUT_DIR / fname
+    for attr in STAGE_REPORTS.get(stage, []):
+        p = getattr(paths, attr)
         if p.exists() and (not log_path or p != Path(log_path)):
-            parts += [f"--- {fname} ---", p.read_text().strip(), ""]
+            parts += [f"--- {p.name} ---", p.read_text().strip(), ""]
 
     base = "\n".join(parts)
     knowledge = _retrieve_knowledge(base)
@@ -186,9 +186,11 @@ def main() -> int:
     ap.add_argument("--stage", required=True, choices=STAGES, help="which stage failed")
     ap.add_argument("--log", default=None, help="path to the failed stage's log")
     ap.add_argument("--dry-run", action="store_true", help="print the gathered context only (no LLM call)")
+    add_workdir_argument(ap)
     args = ap.parse_args()
+    paths = from_args(args)
 
-    context = gather_context(args.stage, args.log)
+    context = gather_context(args.stage, args.log, paths=paths)
     if args.dry_run:
         print("=== gathered failure context (dry-run, no LLM) ===")
         print(context)
@@ -201,10 +203,9 @@ def main() -> int:
         return 1
 
     report = format_report(args.stage, d)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(report)
+    paths.diagnostic_report.write_text(report)
     print(report, end="")
-    print(f"(written to {REPORT_PATH})")
+    print(f"(written to {paths.diagnostic_report})")
     return 0
 
 

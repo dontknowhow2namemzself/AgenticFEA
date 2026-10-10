@@ -39,21 +39,16 @@ import numpy as np
 import pyvista as pv
 
 from params import PARAMS
+from paths import RunPaths, add_workdir_argument, from_args
 from physics_validation import _von_mises, parse_frd
 
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "out"
-FRD_PATH = OUT_DIR / "beam.frd"
-VTU_PATH = OUT_DIR / "beam.vtu"
-STRESS_PNG = {"x": OUT_DIR / "stress_x.png", "y": OUT_DIR / "stress_y.png", "z": OUT_DIR / "stress_z.png"}
-DISP_PNG = OUT_DIR / "displacement.png"
-
-# Plate renders (top view). Keys are the out/<key>.png basenames.
+# Plate renders (top view): key -> (title, stress component, diverging scale).
+# The filenames come from RunPaths.plate_png(key).
 PLATE_PNG = {
-    "stress_xx": (OUT_DIR / "stress_xx.png", "sigma_xx [MPa]", 0, True),
-    "stress_yy": (OUT_DIR / "stress_yy.png", "sigma_yy [MPa]", 1, True),
-    "stress_xy": (OUT_DIR / "stress_xy.png", "sigma_xy [MPa]", 3, True),
-    "stress_vm": (OUT_DIR / "stress_vm.png", "von Mises [MPa]", None, False),
+    "stress_xx": ("sigma_xx [MPa]", 0, True),
+    "stress_yy": ("sigma_yy [MPa]", 1, True),
+    "stress_xy": ("sigma_xy [MPa]", 3, True),
+    "stress_vm": ("von Mises [MPa]", None, False),
 }
 
 # PNG is named by the axis the camera looks ALONG; PyVista helper renders the
@@ -64,7 +59,7 @@ MIN_PNG_BYTES = 5000  # a real 3D render is tens of KB; a blank image is ~1-2 KB
 pv.OFF_SCREEN = True
 
 
-def convert_frd_to_vtu(frd_path=FRD_PATH) -> Path:
+def convert_frd_to_vtu(frd_path: Path) -> Path:
     """Convert .frd to .vtu via the ccx2paraview CLI. Returns the .vtu path."""
     if shutil.which("ccx2paraview") is None:
         raise RuntimeError("ccx2paraview not on PATH (activate the fea env)")
@@ -125,7 +120,7 @@ def _auto_warp_factor(mesh, u_mag, target_fraction: float = 0.05) -> float:
     return target_fraction * diag / peak
 
 
-def _postprocess_plate(mesh, frd, vtu_path, warp_factor) -> dict:
+def _postprocess_plate(mesh, frd, vtu_path, warp_factor, paths: RunPaths) -> dict:
     """Plate renders: top view of sxx / syy / sxy / von Mises + |U| (plate M8)."""
     disp = np.asarray(mesh.point_data["U"])
     u_mag = np.linalg.norm(disp, axis=1)
@@ -145,7 +140,8 @@ def _postprocess_plate(mesh, frd, vtu_path, warp_factor) -> dict:
 
     render_error = ""
     try:
-        for key, (path, title, comp, diverging) in PLATE_PNG.items():
+        for key, (title, comp, diverging) in PLATE_PNG.items():
+            path = paths.plate_png(key)
             if comp is None:
                 scal, cmap, clim = "S_Mises", "jet", None
             else:
@@ -158,12 +154,12 @@ def _postprocess_plate(mesh, frd, vtu_path, warp_factor) -> dict:
                 clim = (-lim, lim) if diverging and lim > 0 else None
             _render_plate(mesh, scal, title, path, cmap=cmap, clim=clim)
         _render_plate(mesh, "U_magnitude", f"|U| [mm] (deformed x{warp_factor:.0f})",
-                      DISP_PNG, cmap="viridis", warp_factor=warp_factor)
+                      paths.displacement_png, cmap="viridis", warp_factor=warp_factor)
     except Exception as exc:  # noqa: BLE001
         render_error = f"{exc.__class__.__name__}: {exc}"
 
-    pngs = {k: v[0] for k, v in PLATE_PNG.items()}
-    pngs["displacement"] = DISP_PNG
+    pngs = {k: paths.plate_png(k) for k in PLATE_PNG}
+    pngs["displacement"] = paths.displacement_png
     png_sizes = {name: (p.stat().st_size if p.exists() else 0) for name, p in pngs.items()}
 
     return {
@@ -185,22 +181,23 @@ def _postprocess_plate(mesh, frd, vtu_path, warp_factor) -> dict:
     }
 
 
-def run_postprocess(frd_path=FRD_PATH, warp_factor=None, params=None) -> dict:
+def run_postprocess(warp_factor=None, params=None, paths: RunPaths = None) -> dict:
     """Convert, render, and cross-check. Returns a summary dict.
 
     warp_factor=None means "choose one": the plate scales itself (see
     _auto_warp_factor), the cantilever keeps its verified x5 default.
     """
     params = params if params is not None else PARAMS
-    vtu_path = convert_frd_to_vtu(frd_path)
+    paths = paths or RunPaths.default()
+    vtu_path = convert_frd_to_vtu(paths.frd)
     if params["geometry"]["type"] == "plate_with_hole":
-        return _postprocess_plate(pv.read(str(vtu_path)), parse_frd(Path(frd_path)),
-                                  vtu_path, warp_factor)
-    return _postprocess_beam(vtu_path, frd_path,
-                             5.0 if warp_factor is None else warp_factor)
+        return _postprocess_plate(pv.read(str(vtu_path)), parse_frd(paths.frd),
+                                  vtu_path, warp_factor, paths)
+    return _postprocess_beam(vtu_path, paths.frd,
+                             5.0 if warp_factor is None else warp_factor, paths)
 
 
-def _postprocess_beam(vtu_path, frd_path, warp_factor) -> dict:
+def _postprocess_beam(vtu_path, frd_path, warp_factor, paths: RunPaths) -> dict:
     """Cantilever renders: von Mises from three directions + deformed shape."""
     mesh = pv.read(str(vtu_path))
     frd_path = Path(frd_path)
@@ -229,13 +226,15 @@ def _postprocess_beam(vtu_path, frd_path, warp_factor) -> dict:
     render_error = ""
     try:
         for axis, view in VIEW_METHOD.items():
-            _render(mesh, "S_Mises", "von Mises [MPa]", view, STRESS_PNG[axis], cmap="jet")
+            _render(mesh, "S_Mises", "von Mises [MPa]", view, paths.beam_stress_png(axis),
+                    cmap="jet")
         _render(mesh, "U_magnitude", f"|U| [mm] (deformed x{warp_factor:g})",
-                "view_xz", DISP_PNG, cmap="viridis", warp_factor=warp_factor)
+                "view_xz", paths.displacement_png, cmap="viridis", warp_factor=warp_factor)
     except Exception as exc:  # noqa: BLE001
         render_error = f"{exc.__class__.__name__}: {exc}"
 
-    pngs = {**{f"stress_{a}": p for a, p in STRESS_PNG.items()}, "displacement": DISP_PNG}
+    pngs = {**{f"stress_{a}": paths.beam_stress_png(a) for a in VIEW_METHOD},
+            "displacement": paths.displacement_png}
     png_sizes = {name: (p.stat().st_size if p.exists() else 0) for name, p in pngs.items()}
 
     return {
@@ -272,7 +271,7 @@ def report_and_check(s: dict) -> bool:
         print(f"           {name:<14}: {size / 1024:.1f} KB")
     if s["render_error"]:
         print(f"  !! render error: {s['render_error']}")
-        print("     fallback: open out/beam.vtu in the ParaView GUI (human path).")
+        print(f"     fallback: open {s['vtu_path']} in the ParaView GUI (human path).")
 
     pngs_ok = all(size >= MIN_PNG_BYTES for size in s["png_sizes"].values())
     n_png = len(s["png_sizes"])
@@ -290,11 +289,12 @@ def report_and_check(s: dict) -> bool:
     print(f"ACCEPTANCE: {'PASS' if passed else 'FAIL'}")
     if passed:
         if is_plate:
-            print("Human check (optional): open out/beam.vtu in ParaView; confirm the hole")
+            print(f"Human check (optional): open {s['vtu_path']} in ParaView; confirm the hole")
             print("  peak sits on the transverse diameter and the field is smooth.")
             print("Next: numerical verification (layer 7) - SCF vs Howland, displacement N/A.")
         else:
-            print("Human check (optional): open out/beam.vtu in ParaView; confirm bend & stress pattern.")
+            print(f"Human check (optional): open {s['vtu_path']} in ParaView; "
+                  f"confirm bend & stress pattern.")
             print("Next: numerical verification (layer 7) - displacement vs analytical, stress N/A.")
     print("=" * 64)
     return passed
@@ -306,8 +306,9 @@ def main() -> int:
     parser.add_argument("--warp", type=float, default=None,
                         help="displacement exaggeration factor "
                              "(default: auto for the plate, x5 for the beam)")
+    add_workdir_argument(parser)
     args = parser.parse_args()
-    summary = run_postprocess(warp_factor=args.warp)
+    summary = run_postprocess(warp_factor=args.warp, paths=from_args(args))
     return 0 if report_and_check(summary) else 1
 
 

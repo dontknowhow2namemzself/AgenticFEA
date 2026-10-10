@@ -19,7 +19,6 @@ import pipeline_run
 
 HERE = Path(__file__).resolve().parent
 DEMO = HERE / "demo"
-OUT = HERE / "out"
 
 # Recorded last-wins for out/: keep the passing cantilever last.
 EXAMPLES = {
@@ -53,13 +52,38 @@ def _artifact_names(rec: dict) -> list:
 
 
 def _rewrite_paths(rec: dict, name: str) -> None:
-    """Point artifact paths at the demo snapshot copies (relative)."""
+    """Point artifact paths at the demo snapshot copies (relative).
+
+    The run's working directory is rewritten too: it is an absolute path on the
+    recording machine (user name included), and demo/*/run.json is committed.
+    """
+    rec["workdir"] = f"demo/{name}"
     for s in rec["stages"]:
         for a in s.get("artifacts", []):
             if "path" in a:
                 a["path"] = f"demo/{name}/{Path(a['path']).name}"
             if "views" in a:
                 a["views"] = {k: f"demo/{name}/{Path(v).name}" for k, v in a["views"].items()}
+
+
+def _scrub(obj):
+    """Make every absolute path in the record relative, in every string.
+
+    The stage reports print the files they read (`frd: /Users/<name>/.../beam.frd`),
+    and demo/*/run.json is committed -- so without this the recording machine's
+    user name and folder layout end up in the public repo. Paths under the repo
+    become repo-relative (`out/runs/<id>/beam.frd`, still true to where the run
+    wrote); anything else under the home directory falls back to `~/`.
+    """
+    if isinstance(obj, str):
+        for old, new in ((f"{HERE}/", ""), (str(HERE), "."), (f"{Path.home()}/", "~/")):
+            obj = obj.replace(old, new)
+        return obj
+    if isinstance(obj, list):
+        return [_scrub(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _scrub(v) for k, v in obj.items()}
+    return obj
 
 
 def snapshot(name: str, description: str) -> None:
@@ -69,10 +93,12 @@ def snapshot(name: str, description: str) -> None:
         for stale in dst.glob("*.png"):      # a re-record must not keep old renders
             stale.unlink()
     dst.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(rec["workdir"])          # wherever this run actually wrote
     for f in _artifact_names(rec):
-        if (OUT / f).exists():
-            shutil.copy(OUT / f, dst / f)
+        if (run_dir / f).exists():
+            shutil.copy(run_dir / f, dst / f)
     _rewrite_paths(rec, name)
+    rec = _scrub(rec)
     (dst / "run.json").write_text(json.dumps(rec, indent=2, default=str))
     print(f"recorded {name:<16} status={rec['status']:<9} verdict={rec['verdict']:<5} "
           f"stages={[s['status'] for s in rec['stages']]}")

@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# Solver layer 4 (plan section 4): run CalculiX ccx on out/beam.inp.
+# Solver layer 4 (plan section 4): run CalculiX ccx on <run>/beam.inp.
 #
-# Threads: OMP_NUM_THREADS defaults to the number of Apple-silicon PERFORMANCE
-# cores (hw.perflevel0.physicalcpu). FEM solves are barrier-heavy; spilling onto
-# the slower efficiency cores makes them the straggler and hurts throughput, so
-# we fill the P-cores only. A caller-provided OMP_NUM_THREADS is respected.
+# Usage: bash solve.sh [RUN_DIR]        (RUN_DIR defaults to out/)
 #
-# Output: out/beam.frd (U / RF / S), out/beam.dat, out/beam.sta, out/ccx.log.
+# ccx runs INSIDE the run directory. It writes scratch files into its current
+# directory (spooles.out among them), so launching it from elsewhere scattered
+# them wherever the command happened to start -- and two runs started from the
+# same place would have shared them.
+#
+# Threads: on Apple silicon OMP_NUM_THREADS defaults to the PERFORMANCE cores
+# (hw.perflevel0.physicalcpu). FEM solves are barrier-heavy; spilling onto the
+# slower efficiency cores makes them the straggler and hurts throughput, so we
+# fill the P-cores only. Elsewhere (Linux, i.e. a server) every core is used.
+# A caller-provided OMP_NUM_THREADS is respected.
+#
+# Output: <run>/beam.frd (U / RF / S), beam.dat, beam.sta, ccx.log.
 # Acceptance (plan layer 4): exit 0, no *ERROR in the log, frd has the result
 # blocks. The frd also carries an ERROR block = CalculiX stress error estimator,
 # which is informational, not a failure.
@@ -14,8 +22,10 @@ set -euo pipefail
 
 # Project root = this script's directory (works from any CWD).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="$ROOT/out"
-JOB="$OUT/beam"          # ccx -i <job> reads <job>.inp, writes <job>.frd, ...
+RUN_ARG="${1:-$ROOT/out}"
+OUT="$(cd "$RUN_ARG" 2>/dev/null && pwd)" || { echo "ERROR: run directory $RUN_ARG not found"; exit 1; }
+JOB_NAME="beam"          # ccx -i <job> reads <job>.inp, writes <job>.frd, ...
+JOB="$OUT/$JOB_NAME"
 LOG="$OUT/ccx.log"
 
 # Preconditions.
@@ -23,8 +33,17 @@ command -v ccx >/dev/null 2>&1 || { echo "ERROR: ccx not on PATH (activate the f
 [ -f "$JOB.inp" ] || { echo "ERROR: $JOB.inp not found; run build_inp.py first"; exit 1; }
 
 # Thread count = performance cores unless the caller already set OMP_NUM_THREADS.
-PCORES="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || sysctl -n hw.physicalcpu)"
-ECORES="$(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null || echo '?')"
+# Each probe sits in an `if`, so a missing sysctl key is a branch, not a fatal
+# error: under `set -e` a failing command substitution in a plain assignment
+# would end the script on the spot, which is what happened on Linux before.
+if PC="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null)"; then        # Apple silicon
+  PCORES="$PC"
+  ECORES="$(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null || echo 0)"
+elif PC="$(sysctl -n hw.physicalcpu 2>/dev/null)"; then                  # Intel mac
+  PCORES="$PC"; ECORES="-"
+else                                                                     # Linux and others
+  PCORES="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"; ECORES="-"
+fi
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-$PCORES}"
 export CCX_NPROC_EQUATION_SOLVER="${CCX_NPROC_EQUATION_SOLVER:-$OMP_NUM_THREADS}"
 
@@ -37,9 +56,10 @@ echo "OMP_NUM_THREADS : $OMP_NUM_THREADS   CCX_NPROC_EQUATION_SOLVER: $CCX_NPROC
 echo "ccx             : $(command -v ccx)"
 echo "------------------------------------------------------------------"
 
-# Run the solve; capture the exit code without aborting (it is an acceptance gate).
+# Run the solve inside the run directory; capture the exit code without
+# aborting (it is an acceptance gate).
 set +e
-ccx -i "$JOB" > "$LOG" 2>&1
+( cd "$OUT" && ccx -i "$JOB_NAME" ) > "$LOG" 2>&1
 RC=$?
 set -e
 echo "ccx exit code   : $RC"
@@ -64,13 +84,13 @@ echo "------------------------------------------------------------------"
 check "ccx exit code == 0" "$C_EXIT"
 check "no *ERROR in ccx log" "$C_ERR"
 check "ccx reported 'Job finished'" "$C_FIN"
-check "out/beam.frd exists and non-empty" "$C_FRD"
+check "$JOB_NAME.frd exists and non-empty" "$C_FRD"
 check "frd has U(DISP) / S(STRESS) / RF(FORC) blocks" "$C_BLK"
 echo "------------------------------------------------------------------"
 if [ "$PASS" -eq 1 ]; then
   echo "ACCEPTANCE: PASS"
   echo "Note: frd also has an ERROR block = CalculiX stress error estimator (informational)."
-  echo "Next: physics validation (layer 5) reads out/beam.frd."
+  echo "Next: physics validation (layer 5) reads $JOB.frd."
   echo "=================================================================="
   exit 0
 else

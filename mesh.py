@@ -38,12 +38,8 @@ import gmsh
 import numpy as np
 
 from params import PARAMS
+from paths import RunPaths, add_workdir_argument, from_args
 from schema import PLATE_EDGE_LABELS
-
-# Project-anchored paths (work regardless of the caller's CWD).
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "out"
-MSH_PATH = OUT_DIR / "beam.msh"
 
 # Fixed naming contract for the six box faces (neutral geometry, no BC meaning).
 FACE_LABELS = (
@@ -156,18 +152,19 @@ def _set_structured_hex(nx: int, ny: int, nz: int) -> None:
         gmsh.model.mesh.setTransfiniteVolume(tag)
 
 
-def build_mesh(params: dict, verbose: bool = False) -> dict:
-    """Build the mesh for the active geometry, write out/beam.msh, and return
+def build_mesh(params: dict, verbose: bool = False, paths: RunPaths = None) -> dict:
+    """Build the mesh for the active geometry, write <run>/beam.msh, and return
     an acceptance summary. Dispatches on geometry.type (the extension point)."""
+    msh_path = (paths or RunPaths.default()).msh
     geom_type = params["geometry"]["type"]
     if geom_type == "cantilever_beam":
-        return _build_cantilever_mesh(params, verbose=verbose)
+        return _build_cantilever_mesh(params, msh_path, verbose=verbose)
     if geom_type == "plate_with_hole":
-        return _build_plate_mesh(params, verbose=verbose)
+        return _build_plate_mesh(params, msh_path, verbose=verbose)
     raise NotImplementedError(f"geometry.type={geom_type!r} is not supported")
 
 
-def _build_cantilever_mesh(params: dict, verbose: bool = False) -> dict:
+def _build_cantilever_mesh(params: dict, msh_path: Path, verbose: bool = False) -> dict:
     """Structured second-order hex mesh for the cantilever box (plan 3.1)."""
     g = params["geometry"]["cantilever_beam"]
     L, h, b = float(g["L"]), float(g["h"]), float(g["b"])
@@ -190,7 +187,7 @@ def _build_cantilever_mesh(params: dict, verbose: bool = False) -> dict:
     nz = _divisions(h, elem_size)
     tol = 1e-6 * max(L, h, b)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    msh_path.parent.mkdir(parents=True, exist_ok=True)
 
     gmsh.initialize()
     try:
@@ -246,11 +243,11 @@ def _build_cantilever_mesh(params: dict, verbose: bool = False) -> dict:
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.Binary", 0)
         gmsh.option.setNumber("Mesh.SaveAll", 0)
-        gmsh.write(str(MSH_PATH))
+        gmsh.write(str(msh_path))
     finally:
         gmsh.finalize()
 
-    file_size = MSH_PATH.stat().st_size if MSH_PATH.exists() else 0
+    file_size = msh_path.stat().st_size if msh_path.exists() else 0
     return {
         "geometry": {"type": "cantilever_beam", "L": L, "h": h, "b": b},
         "mesh": {
@@ -262,7 +259,7 @@ def _build_cantilever_mesh(params: dict, verbose: bool = False) -> dict:
         "elem_counts": elem_counts,
         "min_quality": min_quality,
         "face_node_counts": face_node_counts,
-        "msh_path": str(MSH_PATH),
+        "msh_path": str(msh_path),
         "file_size": file_size,
     }
 
@@ -318,7 +315,7 @@ def _classify_plate_curves(a: float, b: float, xc: float, yc: float, r: float,
     return label_to_tags
 
 
-def _build_plate_mesh(params: dict, verbose: bool = False) -> dict:
+def _build_plate_mesh(params: dict, msh_path: Path, verbose: bool = False) -> dict:
     """2D plane-stress plate-with-hole mesh (plate plan M2).
 
     Rectangle minus disk in the z = 0 plane, second-order elements, local
@@ -354,7 +351,7 @@ def _build_plate_mesh(params: dict, verbose: bool = False) -> dict:
         )
     tol = 1e-6 * max(a, b)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    msh_path.parent.mkdir(parents=True, exist_ok=True)
 
     gmsh.initialize()
     try:
@@ -450,11 +447,11 @@ def _build_plate_mesh(params: dict, verbose: bool = False) -> dict:
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.option.setNumber("Mesh.Binary", 0)
         gmsh.option.setNumber("Mesh.SaveAll", 0)
-        gmsh.write(str(MSH_PATH))
+        gmsh.write(str(msh_path))
     finally:
         gmsh.finalize()
 
-    file_size = MSH_PATH.stat().st_size if MSH_PATH.exists() else 0
+    file_size = msh_path.stat().st_size if msh_path.exists() else 0
     return {
         "geometry": {"type": "plate_with_hole",
                      "a": a, "b": b, "t": t, "r": r, "xc": xc, "yc": yc},
@@ -476,7 +473,7 @@ def _build_plate_mesh(params: dict, verbose: bool = False) -> dict:
         "area_rel_err": area_rel_err,
         "max_abs_z": max_abs_z,
         "z_tol": tol,
-        "msh_path": str(MSH_PATH),
+        "msh_path": str(msh_path),
         "file_size": file_size,
     }
 
@@ -545,7 +542,7 @@ def _report_plate(s: dict) -> bool:
     print("-" * 64)
     print(f"ACCEPTANCE: {'PASS' if passed else 'FAIL'}")
     if passed:
-        print("Human check (optional): gmsh out/beam.msh")
+        print(f"Human check (optional): gmsh {s['msh_path']}")
     print("=" * 64)
     return passed
 
@@ -585,7 +582,7 @@ def _report_beam(s: dict) -> bool:
     print("-" * 64)
     print(f"ACCEPTANCE: {'PASS' if passed else 'FAIL'}")
     if passed:
-        print("Human check (optional): gmsh out/beam.msh")
+        print(f"Human check (optional): gmsh {s['msh_path']}")
     print("=" * 64)
     return passed
 
@@ -594,8 +591,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Build the active geometry's mesh (plan layer 3.1 / plate plan M2).")
     parser.add_argument("-v", "--verbose", action="store_true", help="show Gmsh log output")
+    add_workdir_argument(parser)
     args = parser.parse_args()
-    summary = build_mesh(PARAMS, verbose=args.verbose)
+    summary = build_mesh(PARAMS, verbose=args.verbose, paths=from_args(args))
     return 0 if report_and_check(summary) else 1
 
 

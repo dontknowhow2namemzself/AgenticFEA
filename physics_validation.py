@@ -48,6 +48,7 @@ Unit system: SI-mm (length mm, force N, stress MPa, displacement mm).
 
 from __future__ import annotations
 
+import argparse
 import sys
 from collections import namedtuple
 from pathlib import Path
@@ -56,13 +57,7 @@ import numpy as np
 
 from boundary_conditions import _read_boundary_node_sets, build_bc
 from params import PARAMS
-
-HERE = Path(__file__).resolve().parent
-OUT_DIR = HERE / "out"
-MSH_PATH = OUT_DIR / "beam.msh"
-FRD_PATH = OUT_DIR / "beam.frd"
-INP_PATH = OUT_DIR / "beam.inp"
-REPORT_PATH = OUT_DIR / "physics_report.txt"
+from paths import RunPaths, add_workdir_argument, from_args
 
 # .frd fixed-width layout (verified against this CalculiX 2.23 output):
 #   record key  = columns [0:3]   (" -1", " -4", ...)
@@ -241,26 +236,24 @@ def _add_common_checks(guarded, disp, stress, forc, fixed_ids, applied_total,
     guarded("strain_energy_positive", "CRITICAL", chk_strain_energy)
 
 
-def run_physics_validation(params: dict, msh_path=MSH_PATH, frd_path=FRD_PATH,
-                           inp_path=INP_PATH) -> tuple:
+def run_physics_validation(params: dict, paths: RunPaths = None) -> tuple:
     """Run the geometry's checklist. Returns (overall_pass, checks, info)."""
+    paths = paths or RunPaths.default()
     if params["geometry"]["type"] == "plate_with_hole":
-        return _run_plate_validation(params, msh_path=msh_path, frd_path=frd_path,
-                                     inp_path=inp_path)
-    return _run_beam_validation(params, msh_path=msh_path, frd_path=frd_path)
+        return _run_plate_validation(params, paths)
+    return _run_beam_validation(params, paths)
 
 
-def _run_plate_validation(params: dict, msh_path=MSH_PATH, frd_path=FRD_PATH,
-                          inp_path=INP_PATH) -> tuple:
+def _run_plate_validation(params: dict, paths: RunPaths) -> tuple:
     """Plane-stress plate checklist (plate plan M6)."""
     g = params["geometry"]["plate_with_hole"]
     a, b, t = float(g["a"]), float(g["b"]), float(g["t"])
     r, xc, yc = float(g["r"]), float(g["xc"]), float(g["yc"])
 
-    frd = parse_frd(Path(frd_path))
+    frd = parse_frd(paths.frd)
     coords, disp, stress, forc = frd["coords"], frd["DISP"], frd["STRESS"], frd["FORC"]
 
-    bc_def = build_bc(params, msh_path=msh_path)
+    bc_def = build_bc(params, paths=paths)
     fixed_ids = bc_def["fixed"]["node_ids"]
     load_ids = bc_def["load"]["node_ids"]
     load_dir_unit = np.asarray(bc_def["load"]["loads"][0]["dir_unit"], dtype=float)
@@ -268,12 +261,12 @@ def _run_plate_validation(params: dict, msh_path=MSH_PATH, frd_path=FRD_PATH,
     # Hole nodes come from the MESH physical group: the .frd coordinates are
     # written at E12.5 precision (+-5e-4 mm), so re-deriving "on the circle"
     # from them would miss most of the boundary nodes.
-    edge_sets = _read_boundary_node_sets(msh_path, 1)
+    edge_sets = _read_boundary_node_sets(paths.msh, 1)
     hole_ids = edge_sets.get("hole_boundary", {}).get("node_ids", [])
     hole_xyz = edge_sets.get("hole_boundary", {}).get("xyz", {})
 
     # Applied nodal forces = the deck's consistent *CLOAD (single source of truth).
-    applied_by_node = _read_cload(Path(inp_path)) if Path(inp_path).exists() else {}
+    applied_by_node = _read_cload(paths.inp) if paths.inp.exists() else {}
     applied_total = (np.sum(list(applied_by_node.values()), axis=0)
                      if applied_by_node else np.zeros(3))
 
@@ -385,7 +378,7 @@ def _run_plate_validation(params: dict, msh_path=MSH_PATH, frd_path=FRD_PATH,
 
     overall_pass = all(c.status != "FAIL" for c in checks if c.level == "CRITICAL")
     info = {
-        "version": frd["version"], "frd": str(frd_path),
+        "version": frd["version"], "frd": str(paths.frd),
         "model_line": (f"plate_with_hole a={a} b={b} t={t} mm, hole r={r} at "
                        f"({xc}, {yc}) mm | 2D plane stress"),
         "applied": applied_total.tolist(),
@@ -403,15 +396,15 @@ def _run_plate_validation(params: dict, msh_path=MSH_PATH, frd_path=FRD_PATH,
     return overall_pass, checks, info
 
 
-def _run_beam_validation(params: dict, msh_path=MSH_PATH, frd_path=FRD_PATH) -> tuple:
+def _run_beam_validation(params: dict, paths: RunPaths) -> tuple:
     """Cantilever checklist (plan section 5)."""
     g = params["geometry"]["cantilever_beam"]
     L, h, b = float(g["L"]), float(g["h"]), float(g["b"])
 
-    frd = parse_frd(Path(frd_path))
+    frd = parse_frd(paths.frd)
     coords, disp, stress, forc = frd["coords"], frd["DISP"], frd["STRESS"], frd["FORC"]
 
-    bc_def = build_bc(params, msh_path=msh_path)
+    bc_def = build_bc(params, paths=paths)
     fixed_ids = bc_def["fixed"]["node_ids"]
     load_ids = bc_def["load"]["node_ids"]
 
@@ -504,7 +497,7 @@ def _run_beam_validation(params: dict, msh_path=MSH_PATH, frd_path=FRD_PATH) -> 
 
     overall_pass = all(c.status != "FAIL" for c in checks if c.level == "CRITICAL")
     info = {
-        "version": frd["version"], "frd": str(frd_path),
+        "version": frd["version"], "frd": str(paths.frd),
         "model_line": f"cantilever_beam L={L} h={h} b={b} mm",
         "applied": applied_total.tolist(),
         "n_disp": len(disp), "n_stress": len(stress), "n_forc": len(forc),
@@ -538,12 +531,14 @@ def _format_report(overall_pass: bool, checks: list, info: dict) -> str:
 
 
 def main() -> int:
-    overall_pass, checks, info = run_physics_validation(PARAMS)
+    ap = argparse.ArgumentParser(description="Physics validation gate (plan layer 5).")
+    add_workdir_argument(ap)
+    paths = from_args(ap.parse_args())
+    overall_pass, checks, info = run_physics_validation(PARAMS, paths=paths)
     report = _format_report(overall_pass, checks, info)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(report)
+    paths.physics_report.write_text(report)
     print(report, end="")
-    print(f"(written to {REPORT_PATH})")
+    print(f"(written to {paths.physics_report})")
     return 0 if overall_pass else 1
 
 

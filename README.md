@@ -146,6 +146,12 @@ Either geometry can also be driven through the in‑process orchestrator the das
 python pipeline_run.py --case plate_with_hole
 ```
 
+Every stage reads and writes one **run directory** — `out/` unless told otherwise — so two runs at once never overwrite each other's mesh or results. Pass `--workdir DIR` to `run_all.sh` or to any single stage to pick the directory, or `--new-run` to `pipeline_run.py` for a fresh one under `out/runs/`. The dashboard always gives each live run its own directory there.
+
+```bash
+bash run_all.sh --skip-checkpoints --workdir out/my_run
+```
+
 ### Regenerating the surrogate dataset
 
 The 545‑case dataset (~540 MB of tensors) is **not** in the repository; it is regenerated from a fixed seed, which is why the sampling and meshing were made deterministic in the first place. Roughly 5 minutes:
