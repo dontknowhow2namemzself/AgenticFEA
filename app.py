@@ -25,6 +25,8 @@ from pathlib import Path
 
 import streamlit as st
 
+import viewer
+
 HERE = Path(__file__).resolve().parent
 DEMO_DIR = HERE / "demo"
 DEMO_MODE = os.environ.get("DEMO_MODE", "0") == "1"
@@ -124,6 +126,12 @@ _SYM = {"pass": "✓", "fail": "!", "running": "●", "queued": ""}
 def _img(path: str) -> str:
     p = Path(path)
     return str(p if p.is_absolute() else HERE / p)
+
+
+@st.cache_data(show_spinner=False)
+def _viewer_figure(path: str, mtime: float):
+    """Built once per file; `mtime` makes a re-exported viewer.npz a new entry."""
+    return viewer.figure(viewer.load_payload(path))
 
 
 def load_demo(name: str) -> dict:
@@ -389,7 +397,7 @@ def render_artifact(a: dict):
     if kind == "image":
         p = Path(_img(a["path"]))
         if p.exists():
-            st.image(_img(a["path"]), use_container_width=True)
+            st.image(_img(a["path"]), width="stretch")
         else:
             st.caption("(no image)")
     elif kind == "views":
@@ -411,9 +419,20 @@ def render_artifact(a: dict):
                           key="views_" + "_".join(keys))
         src = views[keys[labels.index(choice)]]
         if Path(_img(src)).exists():
-            st.image(_img(src), use_container_width=True)
+            st.image(_img(src), width="stretch")
         else:
             st.caption("(no image)")
+    elif kind == "viewer3d":
+        # Real element edges over the result field: drag to rotate, scroll to
+        # zoom, hover a node for its value. Field and deformed shape are menus
+        # inside the figure (see viewer.figure for why not widgets here). The
+        # PNG renders below stay as the fixed views.
+        p = Path(_img(a["path"]))
+        if not p.exists():
+            st.caption("(no 3D view for this run)")
+            return
+        st.plotly_chart(_viewer_figure(str(p), p.stat().st_mtime), theme=None, width="stretch",
+                        config=viewer.PLOTLY_CONFIG, key=f"vfig_{p}")
     elif kind == "code":
         st.code(a.get("text", ""), language="text")
     elif kind == "panel":

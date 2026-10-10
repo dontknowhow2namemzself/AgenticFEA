@@ -258,8 +258,13 @@
           "status": "pass"
         },
         {
-          "text": "Rendered von Mises X / Y / Z",
-          "data": "PyVista off-screen",
+          "text": "Exported interactive 3D view",
+          "data": "1500 triangles \u00b7 500 element edges",
+          "status": "pass"
+        },
+        {
+          "text": "Rendered von Mises end / side / top + deformed side",
+          "data": "same fringe, range and edges as the 3D view \u00b7 warp \u00d763.8 auto",
           "status": "pass"
         },
         {
@@ -277,11 +282,15 @@
           "S_Mises",
           "S_Principal",
           "RF",
-          "ERROR",
-          "U_magnitude"
+          "ERROR"
         ]
       },
       "artifacts": [
+        {
+          "kind": "viewer3d",
+          "title": "interactive 3D",
+          "path": "demo/stubby_fail/viewer.npz"
+        },
         {
           "kind": "views",
           "title": "field renders",
@@ -373,5 +382,6 @@
     "host": "M5 / 32GB arm64",
     "n_elem": 250,
     "n_nodes": 1416
-  }
+  },
+  "workdir": "demo/stubby_fail"
 }

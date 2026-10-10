@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Postprocess layer 6 (plan section 6, plate plan M8): .frd -> .vtu -> PNGs.
+"""Postprocess layer 6 (plan section 6, plate plan M8): .frd -> .vtu -> 3D view + PNGs.
 
 Runs ONLY after physics validation (layer 5) passes; the orchestrator skips it
-on a Critical FAIL. Two stages:
+on a Critical FAIL. Three steps:
   (a) convert  : ccx2paraview out/beam.frd vtu   (PyVista cannot read .frd)
-  (b) render   : PyVista off-screen plots, chosen per geometry.
+  (b) export   : viewer.npz -- the outer surface, its nodal results and the
+                 element edges -- which the dashboard shows as an interactive
+                 3D view (viewer.py)
+  (c) render   : the fixed views as PNGs, drawn by viewer.render_png FROM THE
+                 SAME viewer.npz: same element edges, rainbow fringe, range and
+                 bar labels as the 3D view. The 3D view is for looking around;
+                 the PNGs are the views worth keeping.
 
-  cantilever_beam : von Mises from three camera directions (stress_x/y/z.png,
-                    named by the axis looked along) + a deformed-shape
-                    displacement plot (displacement.png).
+  cantilever_beam : von Mises looked at along each axis (stress_x/y/z.png: the
+                    clamped end's face, the side, the top) + the deformed shape
+                    from the side (displacement.png).
   plate_with_hole : the model is flat, so three directions would be pointless.
-                    Instead the top (x-y) view of the four stress fields that
+                    Instead the top view of the four stress fields that
                     describe a plane-stress state -- sxx / syy / sxy / von
-                    Mises -- plus the displacement magnitude. Stress component
-                    plots use a symmetric diverging map centred on zero so
-                    compression around the hole reads as a different colour
-                    than tension, not merely a darker shade of it.
+                    Mises -- plus the deformed shape.
 
 Max displacement and max von Mises are RECORDED for the summary, and cross-
 checked against the .frd to confirm the conversion is lossless. For the
@@ -23,6 +26,8 @@ cantilever, stress is information only and never auto-judged; for the plate the
 SCF is judged in layer 7 (plate plan D3) -- these renders are still the human's
 view of the field either way.
 Fallback: if headless rendering fails, open out/beam.vtu in the ParaView GUI.
+The deformed views use the 3D view's exaggeration rule (peak |U| drawn at 5% of
+the model diagonal), so a PNG and the 3D view show the same deformed shape.
 
 Unit system: SI-mm (displacement mm, stress MPa).
 """
@@ -41,22 +46,15 @@ import pyvista as pv
 from params import PARAMS
 from paths import RunPaths, add_workdir_argument, from_args
 from physics_validation import _von_mises, parse_frd
+import viewer
 
-# Plate renders (top view): key -> (title, stress component, diverging scale).
-# The filenames come from RunPaths.plate_png(key).
-PLATE_PNG = {
-    "stress_xx": ("sigma_xx [MPa]", 0, True),
-    "stress_yy": ("sigma_yy [MPa]", 1, True),
-    "stress_xy": ("sigma_xy [MPa]", 3, True),
-    "stress_vm": ("von Mises [MPa]", None, False),
-}
+# Plate renders (top view): PNG key -> viewer field. The filenames come from
+# RunPaths.plate_png(key).
+PLATE_PNG = {"stress_xx": "sxx", "stress_yy": "syy", "stress_xy": "sxy", "stress_vm": "vm"}
 
-# PNG is named by the axis the camera looks ALONG; PyVista helper renders the
-# orthogonal plane (look along X -> see the Y-Z plane via view_yz, etc.).
-VIEW_METHOD = {"x": "view_yz", "y": "view_xz", "z": "view_xy"}
+# Beam PNGs are named by the axis the camera looks ALONG -> the viewer's view.
+BEAM_VIEWS = {"x": "end", "y": "side", "z": "top"}
 MIN_PNG_BYTES = 5000  # a real 3D render is tens of KB; a blank image is ~1-2 KB
-
-pv.OFF_SCREEN = True
 
 
 def convert_frd_to_vtu(frd_path: Path) -> Path:
@@ -74,59 +72,38 @@ def convert_frd_to_vtu(frd_path: Path) -> Path:
     return produced[0]
 
 
-def _render(mesh, scalars, title, view_method, out_png, cmap, warp_factor=None) -> None:
-    """Off-screen render of `scalars` on `mesh` from one camera direction."""
-    plot_mesh = mesh.warp_by_vector("U", factor=warp_factor) if warp_factor else mesh
-    pl = pv.Plotter(off_screen=True, window_size=(1280, 800))
-    pl.background_color = "#11161f"          # match the dashboard panel (control-room dark)
-    pl.add_mesh(plot_mesh, scalars=scalars, cmap=cmap, show_edges=False,
-                scalar_bar_args={"title": title, "color": "#dbe1e8", "n_labels": 5})
-    getattr(pl, view_method)()
-    pl.add_axes()
-    pl.add_text(f"{title}  [{view_method}]", font_size=10, color="#dbe1e8")
-    pl.screenshot(str(out_png))
-    pl.close()
+def _export_viewer(mesh, paths: RunPaths) -> tuple:
+    """viewer.npz for the dashboard's interactive 3D view: (summary, error).
 
-
-def _render_plate(mesh, scalars, title, out_png, cmap, clim=None,
-                  warp_factor=None) -> None:
-    """Top (x-y) view render of a flat plate field."""
-    plot_mesh = mesh.warp_by_vector("U", factor=warp_factor) if warp_factor else mesh
-    pl = pv.Plotter(off_screen=True, window_size=(1280, 720))
-    pl.background_color = "#11161f"
-    pl.add_mesh(plot_mesh, scalars=scalars, cmap=cmap, clim=clim, show_edges=False,
-                scalar_bar_args={"title": title, "color": "#dbe1e8", "n_labels": 5})
-    pl.view_xy()
-    pl.enable_parallel_projection()   # a flat part reads wrong in perspective
-    pl.camera.tight(padding=0.08)
-    pl.add_text(title, font_size=10, color="#dbe1e8")
-    pl.screenshot(str(out_png))
-    pl.close()
-
-
-def _auto_warp_factor(mesh, u_mag, target_fraction: float = 0.05) -> float:
-    """Exaggeration that makes the peak displacement `target_fraction` of the
-    model's diagonal -- readable but still recognisably the same part.
-
-    A fixed factor cannot serve the batch: the plate's in-plane deflection is
-    ~0.01 mm on a 200 mm part and it changes with the hole size, so any magic
-    number is wrong for most cases.
+    Non-fatal like the renders: a failure is reported in the acceptance check,
+    and none of the recorded numbers depend on it.
     """
-    b = mesh.bounds
-    diag = float(np.hypot(b[1] - b[0], b[3] - b[2]))
-    peak = float(u_mag.max())
-    if peak <= 0 or diag <= 0:
-        return 1.0
-    return target_fraction * diag / peak
+    try:
+        return viewer.save_payload(mesh, paths.viewer_npz), ""
+    except Exception as exc:  # noqa: BLE001
+        return {}, f"{exc.__class__.__name__}: {exc}"
+
+
+def _render_views(views: list, warp_factor, paths: RunPaths) -> tuple:
+    """Draw the fixed views from viewer.npz: (warp used, error or "").
+
+    `views` is [(field, view, png path, deformed?)]. The deformed views use the
+    3D view's exaggeration unless the caller gave one.
+    """
+    payload = viewer.load_payload(paths.viewer_npz)
+    warp = viewer.auto_warp_factor(payload) if warp_factor is None else warp_factor
+    try:
+        for field, view, png, deformed in views:
+            viewer.render_png(payload, field, png, view, warp=warp if deformed else 0.0)
+    except Exception as exc:  # noqa: BLE001
+        return warp, f"{exc.__class__.__name__}: {exc}"
+    return warp, ""
 
 
 def _postprocess_plate(mesh, frd, vtu_path, warp_factor, paths: RunPaths) -> dict:
-    """Plate renders: top view of sxx / syy / sxy / von Mises + |U| (plate M8)."""
+    """Plate: 3D view data + top views of sxx / syy / sxy / von Mises + deformed (plate M8)."""
     disp = np.asarray(mesh.point_data["U"])
     u_mag = np.linalg.norm(disp, axis=1)
-    mesh.point_data["U_magnitude"] = u_mag
-    if warp_factor is None:
-        warp_factor = _auto_warp_factor(mesh, u_mag)
     S = np.asarray(mesh.point_data["S"])
     if "S_Mises" in mesh.point_data:
         vm = np.asarray(mesh.point_data["S_Mises"]).ravel()
@@ -138,25 +115,11 @@ def _postprocess_plate(mesh, frd, vtu_path, warp_factor, paths: RunPaths) -> dic
     ref_disp = max(float(np.linalg.norm(v)) for v in frd["DISP"].values())
     ref_vm = max(_von_mises(s) for s in frd["STRESS"].values())
 
-    render_error = ""
-    try:
-        for key, (title, comp, diverging) in PLATE_PNG.items():
-            path = paths.plate_png(key)
-            if comp is None:
-                scal, cmap, clim = "S_Mises", "jet", None
-            else:
-                name = f"S_{key.split('_')[1]}"
-                mesh.point_data[name] = S[:, comp]
-                scal, cmap = name, "coolwarm"
-                # Symmetric range about zero: compression and tension must be
-                # visually distinct, not two shades of the same colour.
-                lim = float(np.abs(S[:, comp]).max())
-                clim = (-lim, lim) if diverging and lim > 0 else None
-            _render_plate(mesh, scal, title, path, cmap=cmap, clim=clim)
-        _render_plate(mesh, "U_magnitude", f"|U| [mm] (deformed x{warp_factor:.0f})",
-                      paths.displacement_png, cmap="viridis", warp_factor=warp_factor)
-    except Exception as exc:  # noqa: BLE001
-        render_error = f"{exc.__class__.__name__}: {exc}"
+    view, render_error = _export_viewer(mesh, paths)
+    if view:
+        warp_factor, render_error = _render_views(
+            [(field, "top", paths.plate_png(key), False) for key, field in PLATE_PNG.items()]
+            + [("u", "top", paths.displacement_png, True)], warp_factor, paths)
 
     pngs = {k: paths.plate_png(k) for k in PLATE_PNG}
     pngs["displacement"] = paths.displacement_png
@@ -178,14 +141,15 @@ def _postprocess_plate(mesh, frd, vtu_path, warp_factor, paths: RunPaths) -> dic
             "sigma_xy": (float(S[:, 3].min()), float(S[:, 3].max())),
         },
         "png_sizes": png_sizes, "render_error": render_error,
+        "viewer": view, "viewer_error": render_error if not view else "",
     }
 
 
 def run_postprocess(warp_factor=None, params=None, paths: RunPaths = None) -> dict:
     """Convert, render, and cross-check. Returns a summary dict.
 
-    warp_factor=None means "choose one": the plate scales itself (see
-    _auto_warp_factor), the cantilever keeps its verified x5 default.
+    warp_factor=None means "choose one": the 3D view's rule, peak |U| drawn at
+    5% of the model diagonal (viewer.auto_warp_factor), for both geometries.
     """
     params = params if params is not None else PARAMS
     paths = paths or RunPaths.default()
@@ -193,19 +157,17 @@ def run_postprocess(warp_factor=None, params=None, paths: RunPaths = None) -> di
     if params["geometry"]["type"] == "plate_with_hole":
         return _postprocess_plate(pv.read(str(vtu_path)), parse_frd(paths.frd),
                                   vtu_path, warp_factor, paths)
-    return _postprocess_beam(vtu_path, paths.frd,
-                             5.0 if warp_factor is None else warp_factor, paths)
+    return _postprocess_beam(vtu_path, paths.frd, warp_factor, paths)
 
 
 def _postprocess_beam(vtu_path, frd_path, warp_factor, paths: RunPaths) -> dict:
-    """Cantilever renders: von Mises from three directions + deformed shape."""
+    """Cantilever: 3D view data + von Mises along each axis + the deformed side view."""
     mesh = pv.read(str(vtu_path))
     frd_path = Path(frd_path)
 
     # Fields from the .vtu (ccx2paraview precomputes S_Mises; fall back if absent).
     disp = np.asarray(mesh.point_data["U"])
     u_mag = np.linalg.norm(disp, axis=1)
-    mesh.point_data["U_magnitude"] = u_mag
     if "S_Mises" in mesh.point_data:
         vm = np.asarray(mesh.point_data["S_Mises"]).ravel()
     else:
@@ -221,19 +183,15 @@ def _postprocess_beam(vtu_path, frd_path, warp_factor, paths: RunPaths) -> dict:
     disp_ok = bool(np.isclose(max_disp, ref_disp, rtol=1e-3))
     vm_ok = bool(np.isclose(max_vm, ref_vm, rtol=1e-3))
 
-    # Renders (von Mises x3 views + deformed displacement). Non-fatal on failure;
+    # 3D view data, then the fixed views drawn from it. Non-fatal on failure;
     # the ParaView GUI on the .vtu is the documented human fallback.
-    render_error = ""
-    try:
-        for axis, view in VIEW_METHOD.items():
-            _render(mesh, "S_Mises", "von Mises [MPa]", view, paths.beam_stress_png(axis),
-                    cmap="jet")
-        _render(mesh, "U_magnitude", f"|U| [mm] (deformed x{warp_factor:g})",
-                "view_xz", paths.displacement_png, cmap="viridis", warp_factor=warp_factor)
-    except Exception as exc:  # noqa: BLE001
-        render_error = f"{exc.__class__.__name__}: {exc}"
+    view, render_error = _export_viewer(mesh, paths)
+    if view:
+        warp_factor, render_error = _render_views(
+            [("vm", v, paths.beam_stress_png(axis), False) for axis, v in BEAM_VIEWS.items()]
+            + [("u", "side", paths.displacement_png, True)], warp_factor, paths)
 
-    pngs = {**{f"stress_{a}": paths.beam_stress_png(a) for a in VIEW_METHOD},
+    pngs = {**{f"stress_{a}": paths.beam_stress_png(a) for a in BEAM_VIEWS},
             "displacement": paths.displacement_png}
     png_sizes = {name: (p.stat().st_size if p.exists() else 0) for name, p in pngs.items()}
 
@@ -243,8 +201,9 @@ def _postprocess_beam(vtu_path, frd_path, warp_factor, paths: RunPaths) -> dict:
         "n_points": int(mesh.n_points), "n_cells": int(mesh.n_cells),
         "fields": list(mesh.point_data.keys()),
         "max_disp": max_disp, "ref_disp": ref_disp, "disp_ok": disp_ok,
-        "max_vm": max_vm, "ref_vm": ref_vm, "vm_ok": vm_ok,
+        "max_vm": max_vm, "ref_vm": ref_vm, "vm_ok": vm_ok, "warp_factor": warp_factor,
         "png_sizes": png_sizes, "render_error": render_error,
+        "viewer": view, "viewer_error": render_error if not view else "",
     }
 
 
@@ -264,14 +223,21 @@ def report_and_check(s: dict) -> bool:
         print( "components (plane stress; sigma_zz == 0 by definition):")
         for name, (lo, hi) in s["stress_ranges"].items():
             print(f"           {name:<9}: [{lo:9.3f}, {hi:9.3f}] MPa")
-        print(f"warp     : x{s['warp_factor']:.0f} (auto: peak |U| drawn at 5% of the "
-              f"model diagonal)")
+    if s.get("warp_factor") is not None:
+        print(f"warp     : x{s['warp_factor']:.3g} (peak |U| drawn at 5% of the model diagonal,"
+              f" as in the 3D view)")
     print( "renders  :")
     for name, size in s["png_sizes"].items():
         print(f"           {name:<14}: {size / 1024:.1f} KB")
     if s["render_error"]:
         print(f"  !! render error: {s['render_error']}")
         print(f"     fallback: open {s['vtu_path']} in the ParaView GUI (human path).")
+    v = s["viewer"]
+    if v:
+        print(f"3D view  : {Path(v['path']).name}  ({v['kbytes']:.0f} KB; {v['n_triangles']} "
+              f"triangles, {v['n_edges']} element edges)")
+    else:
+        print(f"  !! 3D view export error: {s['viewer_error']}")
 
     pngs_ok = all(size >= MIN_PNG_BYTES for size in s["png_sizes"].values())
     n_png = len(s["png_sizes"])
@@ -280,6 +246,7 @@ def report_and_check(s: dict) -> bool:
         ("max |U| matches frd (lossless conversion)", s["disp_ok"]),
         ("max von Mises matches frd (lossless conversion)", s["vm_ok"]),
         (f"all {n_png} PNGs exist and are non-empty", pngs_ok),
+        ("3D view data exported (viewer.npz)", bool(s["viewer"])),
     ]
     passed = all(ok for _, ok in checks)
     print("-" * 64)

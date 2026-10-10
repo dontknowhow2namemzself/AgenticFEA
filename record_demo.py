@@ -6,16 +6,28 @@ Each example runs the full pipeline once (needs the fea env + API key), then its
 run record (run.json) and artifact images are snapshotted into demo/<name>/.
 Run order leaves out/ holding the standard passing cantilever.
 
-Usage:  python record_demo.py
+Usage:  python record_demo.py                   (re-record all; needs the API key)
+        python record_demo.py --refresh-renders (redraw the existing snapshots'
+                                                 3D view and PNGs; no key, no LLM)
 """
 
 from __future__ import annotations
 
+import argparse
+import ast
 import json
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
+import numpy as np
+
+import build_inp
+import mesh
 import pipeline_run
+import postprocess
+from paths import RunPaths
 
 HERE = Path(__file__).resolve().parent
 DEMO = HERE / "demo"
@@ -104,8 +116,64 @@ def snapshot(name: str, description: str) -> None:
           f"stages={[s['status'] for s in rec['stages']]}")
 
 
+def _recorded_params(rec: dict) -> dict:
+    """The validated parameter set a snapshot was solved with (its layer-2 record)."""
+    text = next(a["text"] for s in rec["stages"] if s["id"] == "parameterize"
+                for a in s["artifacts"] if a.get("title") == "params.py (validated)")
+    return ast.literal_eval(text.split("=", 1)[1])
+
+
+def refresh_renders(name: str) -> None:
+    """Redraw an existing snapshot's post-processing without re-recording it.
+
+    Re-recording would call the language layers again and replace the recorded
+    conversation. Instead the deterministic chain (mesh -> deck -> solve ->
+    postprocess, no LLM) is re-run on the snapshot's own validated parameters,
+    and the result is accepted only if it reproduces the recorded maxima -- so
+    the new renders are shown to be of the same solution. The Post-Process
+    stage is then rebuilt by the same function a live run uses, and its 3D
+    view data and PNGs replace the old ones.
+    """
+    dst = DEMO / name
+    rec = json.loads((dst / "run.json").read_text())
+    params = _recorded_params(rec)
+    k = next(i for i, s in enumerate(rec["stages"]) if s["id"] == "postprocess")
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = RunPaths(Path(tmp)).ensure()
+        mesh.build_mesh(params, paths=paths)
+        build_inp.build_inp(params, paths=paths)
+        subprocess.run(["bash", str(HERE / "solve.sh"), str(paths.root)],
+                       check=True, capture_output=True)
+        post = postprocess.run_postprocess(params=params, paths=paths)
+        for key in ("max_disp", "max_vm"):
+            old_v, new_v = rec["stages"][k]["data"][key], post[key]
+            if not np.isclose(new_v, old_v, rtol=1e-6, atol=0):
+                raise SystemExit(f"{name}: {key} {new_v!r} does not reproduce the recorded "
+                                 f"{old_v!r}; snapshot left unchanged")
+        if post["render_error"]:
+            raise SystemExit(f"{name}: rendering failed ({post['render_error']}); snapshot left unchanged")
+        is_plate = params["geometry"]["type"] == "plate_with_hole"
+        stage = pipeline_run.postprocess_stage(post, is_plate, paths)
+        files = _artifact_names({"stages": [stage]})
+        for f in files:
+            shutil.copy(paths.root / f, dst / f)
+    stage["report"] = rec["stages"][k].get("report", "")
+    rec["stages"][k] = stage
+    _rewrite_paths(rec, name)
+    (dst / "run.json").write_text(json.dumps(_scrub(rec), indent=2, default=str))
+    print(f"refreshed {name:<16} {len(files)} files · max |U| and max vM reproduce the record")
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description="Record (or refresh) the dashboard's demo snapshots.")
+    ap.add_argument("--refresh-renders", action="store_true",
+                    help="redraw the existing snapshots' 3D view and PNGs (no LLM call)")
+    args = ap.parse_args()
     DEMO.mkdir(exist_ok=True)
+    if args.refresh_renders:
+        for name in EXAMPLES:
+            refresh_renders(name)
+        return 0
     for name, description in EXAMPLES.items():
         snapshot(name, description)
     print(f"\nsnapshots in {DEMO}/ — set DEMO_MODE=1 to serve them without a key or solver.")

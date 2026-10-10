@@ -142,6 +142,11 @@ class RunPaths:
     def plate_png(self, key: str) -> Path:
         return self.root / PLATE_PNG_NAMES[key]
 
+    @property
+    def viewer_npz(self) -> Path:
+        """Surface, nodal results and element edges for the interactive 3D view."""
+        return self.root / "viewer.npz"
+
 
 def add_workdir_argument(parser: argparse.ArgumentParser) -> None:
     """The same --workdir option on every stage's command line."""
