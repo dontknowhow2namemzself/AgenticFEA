@@ -149,22 +149,26 @@ def _validity(params: dict, sigma: float, sigma_what: str, thickness: float,
     """Is the linear-elastic, small-deflection model valid for this result?
 
     `thickness` is the governing thickness [mm] that picks the yield strength's
-    band. Returns [{"name", "status" (OK | EXCEEDED | NOT CHECKED), "detail"}, ...].
+    band. Returns [{"name", "status" (OK | EXCEEDED | NOT CHECKED), "detail"}, ...];
+    the yield check also carries its "basis": which fy, and where it comes from.
     """
     checks = []
     material = params["material"]["name"]
     fy = yield_strength(material, thickness)
     if fy is None:
+        basis = f"no yield strength for {material} in the materials library"
         checks.append({"name": "stress below yield", "status": "NOT CHECKED",
-                       "detail": f"no yield strength for {material} in the materials library"})
+                       "detail": basis, "basis": basis})
     elif fy[0] is None:
-        checks.append({"name": "stress below yield", "status": "NOT CHECKED", "detail": fy[1]})
+        checks.append({"name": "stress below yield", "status": "NOT CHECKED",
+                       "detail": fy[1], "basis": fy[1]})
     else:
         fy_value, source = fy
         ok = sigma <= fy_value
         checks.append({"name": "stress below yield", "status": "OK" if ok else "EXCEEDED",
                        "detail": (f"{sigma_what} = {sigma:.1f} MPa {'<=' if ok else '>'} "
-                                  f"fy = {fy_value:g} MPa ({sigma / fy_value:.2f} x fy); {source}")})
+                                  f"fy = {fy_value:g} MPa ({sigma / fy_value:.2f} x fy); {source}"),
+                       "basis": source})
     if delta is not None:
         ratio = delta / length
         ok = ratio <= SMALL_DEFLECTION

@@ -115,7 +115,7 @@ def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
     """The Post-Process stage record, from postprocess.run_postprocess's summary.
 
     One place builds it, so a demo snapshot refreshed without re-running the
-    language layers (record_demo --refresh-renders) gets exactly the stage a
+    language layers (record_demo --refresh) gets exactly the stage a
     live run would.
     """
     if is_plate:
@@ -155,7 +155,7 @@ def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
 def verify_stage(params: dict, is_plate: bool, paths: RunPaths) -> tuple:
     """(the Verify stage record, the verdict, validity warnings), and the report file.
 
-    One place builds it, shared with record_demo --refresh-renders. The
+    One place builds it, shared with record_demo --refresh. The
     verdict judges agreement with the reference; the validity checks
     (verification._validity) say whether the linear-elastic model fits the
     result at all, and turn the stage amber -- not red -- when it does not.
@@ -186,6 +186,7 @@ def verify_stage(params: dict, is_plate: bool, paths: RunPaths) -> tuple:
         "tol_pct": round(judged.get("tol", default_tol) * 100, 2), "verdict": verdict,
         "kb_ref": kb, "provenance": judged.get("provenance")})
     validity = meta["validity"]
+    vdata["yield"] = next((c["basis"] for c in validity if "basis" in c), None)
     exceeded = [c for c in validity if c["status"] == "EXCEEDED"]
     warnings = [f'{c["name"]}: {c["detail"].split(";")[0]}' for c in exceeded]
     record = dict(id="verify", label="Verify",
@@ -214,7 +215,8 @@ def verify_stage(params: dict, is_plate: bool, paths: RunPaths) -> tuple:
 
 
 def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit=None,
-                 params: dict = None, paths: RunPaths = None, user: str = "local") -> dict:
+                 params: dict = None, paths: RunPaths = None, user: str = "local",
+                 diagnose: bool = True) -> dict:
     """Run the pipeline and return the dashboard's run record.
 
     `params` skips layers 1-2 and runs the deterministic chain on a prepared
@@ -229,6 +231,9 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
 
     `user` is who started the run (the dashboard lists each user's own runs).
     Each stage records its `seconds`: the time since the previous stage.
+
+    `diagnose=False` leaves a failed run without a diagnosis, which is a
+    language-model call (record_demo keeps the one it recorded).
     """
     paths = (paths or RunPaths.default()).ensure()
     emit = emit or (lambda *a: None)   # emit(stage_id, phase) for live progress
@@ -266,7 +271,7 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
                   artifacts=[{"kind": "code", "title": "params (prepared)",
                               "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False,
                                                                    width=78)}] if sid == "parameterize" else [])
-        return _run_deterministic_chain(params, rec, stage, warp, paths)
+        return _run_deterministic_chain(params, rec, stage, warp, paths, diagnose)
 
     # 1 -- task understanding
     t = time.time()
@@ -303,7 +308,7 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
           artifacts=[{"kind": "code", "title": "params.py (validated)",
                       "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False, width=78)}])
 
-    return _run_deterministic_chain(params, rec, stage, warp, paths)
+    return _run_deterministic_chain(params, rec, stage, warp, paths, diagnose)
 
 
 def _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes) -> tuple:
@@ -349,7 +354,8 @@ def _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes) -> tuple:
     return actions, data
 
 
-def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPaths) -> dict:
+def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPaths,
+                             diagnose: bool = True) -> dict:
     """Layers 3-7: pre-process -> solve -> physics -> post -> verify, all inside
     one run directory."""
     is_plate = params["geometry"]["type"] == "plate_with_hole"
@@ -387,7 +393,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
           report=log)
     if not solved:
         rec["status"], rec["verdict"] = "failed", "FAIL"
-        rec["diagnosis"] = _diagnose("solve", params, paths)
+        rec["diagnosis"] = _diagnose("solve", params, paths) if diagnose else None
         return rec
 
     # 5 -- physics validation (fast-fail gate)
@@ -404,7 +410,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
           report=phys_text)
     if not ppass:
         rec["status"], rec["verdict"] = "failed", "FAIL"
-        rec["diagnosis"] = _diagnose("physics", params, paths)
+        rec["diagnosis"] = _diagnose("physics", params, paths) if diagnose else None
         return rec
 
     # 6 -- post-processing
@@ -419,7 +425,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
     stage(**verify)
     if verdict == "FAIL":
         rec["status"] = "failed"
-        rec["diagnosis"] = _diagnose("verification", params, paths)
+        rec["diagnosis"] = _diagnose("verification", params, paths) if diagnose else None
     else:
         rec["status"] = "complete"
     return rec

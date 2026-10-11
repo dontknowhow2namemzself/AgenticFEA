@@ -560,6 +560,13 @@ with right:
                 st.code(stage["report"], language="text")
         if not arts and not stage.get("report"):
             st.caption("no artifact for this stage")
+        if stage["id"] == "verify":
+            # The technical report (report.py): written by code from this run's
+            # record, and only when asked for -- the callable runs on the click.
+            import report
+            st.download_button("⤓ technical report (PDF)", data=lambda r=run: report.build(r),
+                               file_name=report.file_name(run), mime="application/pdf",
+                               on_click="ignore", key=f"report_{report.ident(run)}")
     # diagnostics on the failing stage
     if stage["status"] == "fail" and run.get("diagnosis"):
         d = run["diagnosis"]
