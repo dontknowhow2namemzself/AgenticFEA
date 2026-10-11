@@ -4,6 +4,9 @@ unambiguous problem definition for the parameterization layer.
 
 Responsibilities (plan section 1):
   - Off-topic guard: reject anything that is not an FEA task.
+  - Scope: decline a configuration the pipeline does not model -- but a request
+    that is only VAGUE ("a beam calculation") is not out of scope; it is asked
+    which of the two geometries it is, and the conversation goes on.
   - Completeness: the LLM judges, per dimension, only whether it is SPECIFIED
     (semantic) -- it does NOT invent default values.
   - Missing MUST-HAVE dimensions (geometry, material, fixed end, load):
@@ -17,9 +20,21 @@ Responsibilities (plan section 1):
     type, tolerance): a DETERMINISTIC code policy fills them and every default
     is disclosed in an "assumptions applied" list.
 
-Iron law: the LLM does semantic judgement (is this an FEA task? is dimension X
-specified?); deterministic code owns the default VALUES, the material lookup,
-and the routing. The LLM never fills E/nu/rho.
+Iron law: the LLM does semantic judgement (is this an FEA task? which geometry?
+where did the user state each quantity?); deterministic code owns the values,
+the defaults, the material lookup and the routing. The LLM never fills E/nu/rho.
+
+Values: mentions, not slots. The LLM does not fill "the length" -- it lists
+every place the user STATED a must-have quantity, with the user's exact words
+and the turn they came from. Code then decides: a quoted phrase that is not in
+that user turn is discarded (it was not the user's -- an example in our own
+question, say, or an invention); one distinct value is the value; two
+different values are a contradiction the user is asked to settle, quoting
+their own words; and the reply to that question settles it. A single slot per
+quantity left the model no way to report a contradiction, so it picked a value
+silently -- measured: 15 calls on one conversation that gave the length twice,
+none flagged it, and the length it chose depended on the model and on how the
+earlier turns were worded.
 
 Output: a completed problem statement (+ assumptions) handed to parameterize.py.
 Unit system: SI-mm.
@@ -29,8 +44,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import re
 import sys
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -58,8 +76,9 @@ DEFAULT_PLATE_ELEM_SHAPE = "quad"
 
 
 class TaskAssessment(BaseModel):
-    """What the LLM reports about a description. *_specified = "did the user
-    state this?" (semantic); the values are extracted only when specified."""
+    """The understood problem. Built by CODE: the LLM's report supplies the
+    semantic fields, the must-have values come from resolve(). *_specified =
+    "did the user state this?"."""
     is_fea_task: bool
     off_topic_reason: Optional[str] = None
     in_scope: bool = True
@@ -100,54 +119,138 @@ class TaskAssessment(BaseModel):
     tol_disp: Optional[float] = None
 
 
-SYSTEM_PROMPT = """You analyze a description of a structural FEA problem for a
-cantilever-beam pipeline and call report_understanding. Rules:
+GEOMETRIES = ("cantilever_beam", "plate_with_hole")
+
+# The must-have quantities whose values come from mentions:
+# key -> (TaskAssessment field, how a question names it, unit).
+QUANTITIES = {
+    "L": ("L", "the length L", "mm"),
+    "h": ("h", "the height h", "mm"),
+    "b": ("b", "the width b", "mm"),
+    "plate_a": ("plate_a", "the plate length a", "mm"),
+    "plate_b": ("plate_b", "the plate width b", "mm"),
+    "plate_t": ("plate_t", "the plate thickness t", "mm"),
+    "hole_r": ("hole_r", "the hole radius r", "mm"),
+    "load": ("load_magnitude", "the load", "N"),
+    "material": ("material_name", "the material", ""),
+}
+_GEOMETRY_KEYS = ("L", "h", "b", "plate_a", "plate_b", "plate_t", "hole_r")
+
+
+class Mention(BaseModel):
+    """One place where the user stated a must-have quantity."""
+    quantity: Literal["L", "h", "b", "plate_a", "plate_b", "plate_t", "hole_r", "load", "material"]
+    turn: int                         # the [user N] turn it was stated in
+    quote: str                        # the user's words, copied exactly
+    value: Optional[float] = None     # in SI-mm / N; not for the material
+    material: Optional[str] = None    # the material name, for quantity == "material"
+
+
+class LLMReport(BaseModel):
+    """What the LLM returns: semantic judgements plus mentions -- never the
+    must-have values themselves (code derives those from the mentions)."""
+    is_fea_task: bool
+    off_topic_reason: Optional[str] = None
+    in_scope: bool = True
+    scope_note: Optional[str] = None
+    geometry_type: Optional[str] = None
+    mentions: list[Mention] = []
+    hole_xc: Optional[float] = None
+    hole_yc: Optional[float] = None
+    fixed_specified: bool = False
+    fixed_end: Optional[str] = None
+    load_specified: bool = False
+    load_end: Optional[str] = None
+    load_direction: Optional[str] = None
+    mesh_specified: bool = False
+    mesh_elem_size: Optional[float] = None
+    analysis_specified: bool = False
+    analysis_type: Optional[str] = None
+    nonlinear: Optional[bool] = None
+    tol_specified: bool = False
+    tol_disp: Optional[float] = None
+
+
+SYSTEM_PROMPT = """You read a conversation about a structural FEA problem for a
+two-geometry pipeline and call report_understanding. The conversation is given
+as numbered user turns, "[user 1]", "[user 2]", ..., with the assistant's
+questions in between as "[assistant]". Rules:
 
 - Decide is_fea_task: false only for things that are not solid-mechanics / FEA
   problems at all (greetings, chit-chat, unrelated questions). If false, give a
   short off_topic_reason and leave the rest empty.
-- FIRST set geometry_type, which decides which slots matter:
+- geometry_type, which decides which quantities matter:
     "cantilever_beam"  -- a beam/bar clamped at one end with a transverse load
                           at the free end.
     "plate_with_hole"  -- a flat plate / sheet / strip / panel with a circular
                           hole (or bore / opening / cutout) in it, pulled in
                           tension.
-  Both are fully supported; set in_scope=true for either.
-- cantilever_beam SCOPE: exactly ONE end fully fixed (clamped) and a SINGLE
-  TRANSVERSE POINT LOAD at the opposite FREE END. NOT supported: a load
-  anywhere but the free end (e.g. mid-span), more than one fixed end
-  (clamped-clamped / simply supported), distributed loads, multiple loads,
-  axial-only loads.
-  Slots: L (length), h (height, the load direction), b (width), all in mm.
-- plate_with_hole SCOPE: ONE circular hole, uniaxial TENSION along the plate's
-  length, linear elastic plane stress. NOT supported: several holes, non-circular
-  cutouts, compression, biaxial or shear loading, bending of the plate.
-  Slots: plate_a (length along the pull direction), plate_b (width across it),
-  plate_t (thickness), hole_r (hole RADIUS), hole_xc / hole_yc (hole centre
-  measured from the LOWER-LEFT corner of the plate), all in mm.
-  * If the user gives a DIAMETER, halve it and put the radius in hole_r.
-  * Leave hole_xc / hole_yc null when the hole is described as centred / "in the
-    middle", or when its position is not mentioned at all. Only fill them when a
-    genuine off-centre position is given, and convert it to lower-left-corner
-    coordinates first.
-  * Leave plate_t null when no thickness is given.
-  * The plate's supports are NOT a user choice (the pipeline always uses a
-    roller plus a mid-edge anchor and pulls the far edge), so do not treat a
-    missing support description as a gap: set fixed_specified=true whenever the
-    description makes clear the plate is being pulled or held.
-  * load_magnitude is the TOTAL tensile force in N. Convert a stated stress to a
-    force only if the user gives one (force = stress x b x t); otherwise leave
-    load_specified=false.
-- For each dimension set *_specified to whether the USER ACTUALLY STATED it.
-  Do NOT invent or assume values. Only fill a value when the user gave it (a
-  strongly implied value, e.g. a downward load on a horizontal cantilever, may
-  be marked specified). If unsure, mark it not specified.
-- Dimensions: geometry (L length, h height, b width, in mm); material (name
-  only); fixed (which end is clamped); load (magnitude in N, which end,
-  direction); mesh (element size mm); analysis (static/fatigue, linear/
-  nonlinear); tolerance (displacement tolerance).
-- Convert any units to SI-mm when you extract a value.
+  If the conversation does not yet say which of the two it is ("a beam
+  calculation", "can you help me with an FEA?"), leave geometry_type null and
+  keep in_scope=true: a request that is only vague is NOT out of scope.
+- in_scope=false ONLY when the user describes a configuration the pipeline does
+  not model; give a short scope_note.
+  cantilever_beam supports exactly ONE end fully fixed (clamped) and a SINGLE
+  TRANSVERSE POINT LOAD at the opposite FREE END. NOT supported: a load anywhere
+  but the free end (e.g. mid-span), more than one fixed end (clamped-clamped /
+  simply supported), distributed loads, multiple loads, axial-only loads.
+  plate_with_hole supports ONE circular hole, uniaxial TENSION along the plate's
+  length, linear elastic plane stress. NOT supported: several holes,
+  non-circular cutouts, compression, biaxial or shear loading, plate bending.
+
+- mentions: record EVERY place a user turn states one of these quantities, one
+  mention per statement -- also when a quantity is stated again, and ESPECIALLY
+  when it is stated again with a different value. Never choose between two
+  values yourself and never drop one; the pipeline asks the user.
+    L, h, b      beam length, height (the load direction), width, in mm
+    plate_a      plate length along the pull direction, mm
+    plate_b      plate width across it, mm
+    plate_t      plate thickness, mm
+    hole_r       hole RADIUS, mm (for a stated diameter, the value is half of it)
+    load         the force in N (for the plate: the TOTAL tensile force;
+                 convert a stated stress only if the user gives one:
+                 force = stress x b x t)
+    material     the material name, in "material"
+  For each mention:
+    turn   the number N of the [user N] turn the statement is in
+    quote  the user's exact words for it, copied character for character from
+           that turn (e.g. "1000mm long", "200 x 20 x10", "4.5 kN"). Several
+           quantities may share one quote, like L, h and b in "200 x 20 x10".
+    value  converted to mm / N.
+  Only the USER's words count. Never take a value from an [assistant] turn --
+  its examples ("e.g. 100 x 10 x 10") are not the user's.
+  Read an answer in the light of the question it answers: after the assistant
+  asks for "length L, height h, width b", the reply "200 x 20 x 10" means
+  L=200, h=20, b=10.
+
+- Plate hole position: leave hole_xc / hole_yc null when the hole is centred /
+  "in the middle", or when its position is not mentioned at all. Only fill
+  them for a genuinely off-centre position, measured from the LOWER-LEFT corner.
+- The plate's supports are NOT a user choice (the pipeline always uses a roller
+  plus a mid-edge anchor and pulls the far edge): set fixed_specified=true
+  whenever the plate is described as being pulled or held.
+- For the other dimensions set *_specified to whether the USER ACTUALLY STATED
+  it; do not invent or assume values (a strongly implied value, e.g. a
+  downward load on a horizontal cantilever, may be marked specified). fixed:
+  which end is clamped. load: which end and the direction (its size is a
+  mention). mesh: element size in mm. analysis: static/fatigue, linear/
+  nonlinear. tolerance: the displacement tolerance.
 """
+
+
+def _inline_refs(schema: dict) -> dict:
+    """The tool schema with $defs inlined -- not every model resolves $ref."""
+    defs = schema.pop("$defs", {})
+
+    def walk(node):
+        if isinstance(node, dict):
+            if "$ref" in node:
+                return walk(defs[node["$ref"].split("/")[-1]])
+            return {k: walk(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+    return walk(schema)
 
 
 def _tool_def() -> dict:
@@ -155,20 +258,44 @@ def _tool_def() -> dict:
         "type": "function",
         "function": {
             "name": "report_understanding",
-            "description": "Report which FEA problem dimensions the description specifies.",
-            "parameters": TaskAssessment.model_json_schema(),
+            "description": "Report the geometry, the scope, and where the user stated each quantity.",
+            "parameters": _inline_refs(LLMReport.model_json_schema()),
         },
     }
 
 
-def assess_task(description: str) -> TaskAssessment:
-    """One LLM call: semantic completeness assessment of the description."""
+# ---- the conversation ------------------------------------------------------
+# A conversation is a list of (role, text) or (role, text, meta) entries, role
+# "user" or "agent". An agent entry's meta {"asks": [quantity, ...]} marks a
+# question that asked the user to settle those quantities.
+
+def _meta(entry) -> dict:
+    return (entry[2] or {}) if len(entry) > 2 else {}
+
+
+def _user_turns(conversation) -> list:
+    return [e[1] for e in conversation if e[0] == "user"]
+
+
+def _transcript(conversation) -> str:
+    lines, n = [], 0
+    for entry in conversation:
+        if entry[0] == "user":
+            n += 1
+            lines.append(f"[user {n}] {entry[1]}")
+        else:
+            lines.append(f"[assistant] {entry[1]}")
+    return "\n".join(lines)
+
+
+def assess(conversation) -> LLMReport:
+    """One LLM call: the semantic report on the whole conversation."""
     client = llm_config.make_client()
     resp = client.chat.completions.create(
         model=llm_config.OPENROUTER_MODEL,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": description},
+            {"role": "user", "content": _transcript(conversation)},
         ],
         tools=[_tool_def()],
         tool_choice={"type": "function", "function": {"name": "report_understanding"}},
@@ -176,7 +303,177 @@ def assess_task(description: str) -> TaskAssessment:
     msg = resp.choices[0].message
     if not getattr(msg, "tool_calls", None):
         raise RuntimeError(f"model did not report understanding: {msg.content!r}")
-    return TaskAssessment.model_validate(json.loads(msg.tool_calls[0].function.arguments))
+    return LLMReport.model_validate(json.loads(msg.tool_calls[0].function.arguments))
+
+
+# ---- values: decided by code from the mentions ------------------------------
+def _squash(text: str) -> str:
+    return re.sub(r"\s+", "", text.lower())
+
+
+def _canonical_material(name: str) -> str:
+    canonical, _props = resolve_material(name)
+    return canonical or name.strip().upper()
+
+
+def _distinct(quantity: str, found: list) -> list:
+    """[(value, quote), ...] with one entry per different value, first quote kept."""
+    out = []
+    for value, quote, *_ in found:
+        same = (lambda v: v == value) if quantity == "material" else \
+               (lambda v: math.isclose(v, value, rel_tol=1e-9, abs_tol=1e-12))
+        if not any(same(v) for v, _q in out):
+            out.append((value, quote))
+    return out
+
+
+def resolve(report: LLMReport, conversation) -> tuple:
+    """(values, conflicts, dropped) from the report's mentions, decided by code.
+
+    values    : quantity -> the one value the user gave
+    conflicts : quantity -> [(value, quote), ...] when the user gave several
+    dropped   : mentions whose quote is not in the turn they name -- not the
+                user's words, so not the user's value
+    A reply to a question that asked to settle a quantity (meta "asks")
+    settles it: earlier statements of that quantity no longer count.
+    """
+    users = _user_turns(conversation)
+    found, dropped = [], []          # (quantity, value, quote, turn)
+    for m in report.mentions:
+        value = _canonical_material(m.material) if m.quantity == "material" and m.material \
+            else m.value
+        ok = (1 <= m.turn <= len(users) and m.quote.strip()
+              and _squash(m.quote) in _squash(users[m.turn - 1]) and value is not None)
+        (found if ok else dropped).append((m.quantity, value, m.quote, m.turn))
+
+    settled, pending, turn = {}, [], 0
+    for entry in conversation:
+        if entry[0] == "user":
+            turn += 1
+            for q in pending:
+                answer = _distinct(q, [(v, quote) for qq, v, quote, t in found if qq == q and t == turn])
+                if len(answer) == 1:
+                    settled[q] = (answer[0][0], answer[0][1], turn)
+            pending = []
+        else:
+            pending = list(_meta(entry).get("asks", []))
+
+    values, conflicts = {}, {}
+    for q in QUANTITIES:
+        stated = [(v, quote, t) for qq, v, quote, t in found if qq == q]
+        if q in settled:
+            v0, quote0, t0 = settled[q]
+            stated = [(v0, quote0, t0)] + [s for s in stated if s[2] > t0]
+        options = _distinct(q, stated)
+        if len(options) == 1:
+            values[q] = options[0][0]
+        elif len(options) > 1:
+            conflicts[q] = options
+    return values, conflicts, dropped
+
+
+def _assessment(report: LLMReport, values: dict, conflicts: dict) -> TaskAssessment:
+    slots = {QUANTITIES[q][0]: v for q, v in values.items()}
+    return TaskAssessment(
+        **report.model_dump(exclude={"mentions"}), **slots,
+        geometry_specified=any(q in values or q in conflicts for q in _GEOMETRY_KEYS),
+        material_specified="material" in values or "material" in conflicts)
+
+
+# ---- one step of the conversation -------------------------------------------
+@dataclass
+class Step:
+    """The pipeline's next move in the conversation, and the reply that says so."""
+    kind: str                          # off_topic | out_of_scope | impossible | ask | ready
+    message: str                       # the reply to show, deterministic text
+    reason: str = ""                   # short cause, for logs and the run record
+    asks: list = field(default_factory=list)       # quantities this reply asks to settle
+    gaps: list = field(default_factory=list)
+    conflicts: dict = field(default_factory=dict)
+    dropped: list = field(default_factory=list)
+    resolved: Optional[dict] = None
+    assumptions: list = field(default_factory=list)
+    completed: Optional[str] = None
+    assessment: Optional[TaskAssessment] = None
+
+
+SUPPORTED = ("I handle two geometries: a cantilever beam (one end fixed, a single transverse "
+             "point load at the free end), and a flat plate with one circular hole pulled in "
+             "tension.")
+
+
+def _fmt(value, unit: str) -> str:
+    return f"{value:g} {unit}".strip() if isinstance(value, float) else str(value)
+
+
+def conflict_question(conflicts: dict, gaps: list, a: TaskAssessment) -> str:
+    """Ask the user to settle each contradiction, in their own words."""
+    lines = []
+    for q, options in conflicts.items():
+        _field, name, unit = QUANTITIES[q]
+        said = " and ".join(f"'{quote}' ({_fmt(v, unit)})" for v, quote in options)
+        pick = " or ".join(_fmt(v, unit) for v, _quote in options)
+        lines.append(f"You gave {name} more than once, with different values: {said}. "
+                     f"Which is it: {pick}?")
+    if gaps:
+        lines += ["", consolidated_question(gaps, a)]
+    return "\n".join(lines)
+
+
+def which_geometry_question() -> str:
+    return ("Which problem is it? I can model two:\n"
+            "  - a cantilever beam: one end clamped, one point load at the free end\n"
+            "  - a flat plate with one circular hole, pulled in tension\n"
+            "Tell me which one, with its dimensions, material and load if you have them.")
+
+
+def understand(conversation, report: Optional[LLMReport] = None) -> Step:
+    """The whole layer-1 decision for a conversation so far: one LLM call, then code.
+
+    `report` skips the LLM call (the self-test feeds a prepared one).
+    """
+    report = report or assess(conversation)
+    if not report.is_fea_task:
+        reason = report.off_topic_reason or "off-topic"
+        return Step("off_topic", reason=reason, message=(
+            f"That doesn't look like a structural FEA problem ({reason}). "
+            "Try e.g. 'a steel cantilever 100 mm, 10x10 mm, fixed one end, 1000 N down at the tip'."))
+    if not report.in_scope:
+        reason = report.scope_note or "unsupported configuration"
+        return Step("out_of_scope", reason=reason, message=(
+            f"That's beyond what I can model yet — {reason}. {SUPPORTED} Want to try one of those?"))
+
+    values, conflicts, dropped = resolve(report, conversation)
+    a = _assessment(report, values, conflicts)
+    if a.geometry_type not in GEOMETRIES:
+        return Step("ask", which_geometry_question(), reason="geometry type not stated",
+                    gaps=["geometry_type"], dropped=dropped, assessment=a)
+
+    # A contradicted quantity is asked about as a contradiction, not as missing.
+    stand_in = a.model_copy(update={QUANTITIES[q][0]: options[0][0] for q, options in conflicts.items()})
+    gaps = must_have_gaps(stand_in)
+    if conflicts:
+        return Step("ask", conflict_question(conflicts, gaps, a),
+                    reason="contradictory values: " + ", ".join(conflicts),
+                    asks=list(conflicts), gaps=gaps, conflicts=conflicts, dropped=dropped,
+                    assessment=a)
+    impossible = geometry_impossible(a)
+    if impossible:
+        # Reported, never repaired. Adjusting the user's numbers to make the
+        # geometry valid would answer a different question than the one asked;
+        # the reply with corrected numbers settles them.
+        return Step("impossible", reason=impossible, asks=["plate_a", "plate_b", "hole_r"],
+                    dropped=dropped, assessment=a, message=(
+                        f"That geometry cannot exist as described — {impossible}\n\n"
+                        "Tell me corrected numbers and I will run it."))
+    if gaps:
+        return Step("ask", consolidated_question(gaps, a), reason="missing: " + ", ".join(gaps),
+                    gaps=gaps, dropped=dropped, assessment=a)
+    resolved, assumptions = apply_defaults(a)
+    note = "; ".join(assumptions[:2]) + ("…" if len(assumptions) > 2 else "")
+    return Step("ready", f"✓ Understood — assumed {note}. Running the pipeline…",
+                resolved=resolved, assumptions=assumptions, dropped=dropped,
+                completed=build_description(resolved), assessment=a)
 
 
 def _material_ok(a: TaskAssessment) -> bool:
@@ -231,6 +528,8 @@ def must_have_gaps(a: TaskAssessment) -> list:
     only configuration this geometry implements), so asking for it would be
     theatre. Thickness and hole centre are defaulted and disclosed instead.
     """
+    if a.geometry_type not in GEOMETRIES:
+        return ["geometry_type"]
     gaps = []
     if is_plate(a):
         if not (a.geometry_specified and a.plate_a and a.plate_b and a.hole_r):
@@ -241,12 +540,16 @@ def must_have_gaps(a: TaskAssessment) -> list:
         gaps.append("material")
     if not is_plate(a) and not a.fixed_specified:
         gaps.append("fixed")
-    if not a.load_specified:
+    # The beam's load end is fixed by the supported scope (the free end) and its
+    # direction has a disclosed default, so the load is there once its size is.
+    if not a.load_magnitude:
         gaps.append("load")
     return gaps
 
 
 def _gap_line(gap: str, a: TaskAssessment) -> str:
+    if gap == "geometry_type":
+        return "which problem: a cantilever beam, or a flat plate with a circular hole"
     if gap == "geometry":
         if is_plate(a):
             return ("geometry: plate length a and width b, and hole radius r, in mm "
@@ -402,44 +705,120 @@ def build_description(r: dict) -> str:
 
 def run_task_understanding(description: str, auto: bool = False, max_rounds: int = 3,
                            input_fn=input, verbose: bool = True) -> dict:
-    """Assess -> (ask once per round | stop | default) -> completed definition."""
-    assessment = assess_task(description)
-    if not assessment.is_fea_task:
-        return {"status": "rejected", "reason": assessment.off_topic_reason or "not an FEA task"}
-    impossible = geometry_impossible(assessment)
-    if impossible:
-        return {"status": "impossible_geometry", "reason": impossible}
+    """Understand -> (ask once per round | stop | default) -> completed definition.
 
-    cur_desc = description
-    for _round in range(max_rounds + 1):
-        if not assessment.in_scope:
-            return {"status": "out_of_scope",
-                    "reason": assessment.scope_note or "outside the supported scope"}
-        gaps = must_have_gaps(assessment)
-        if not gaps:
+    The same understand() the dashboard calls. Here the conversation is the
+    terminal -- or, in --auto mode, a single description that must stand alone.
+    """
+    conversation = [("user", description)]
+    for round_ in range(max_rounds + 1):
+        step = understand(conversation)
+        if step.kind != "ask" or auto or round_ == max_rounds:
             break
-        if auto:
-            return {"status": "incomplete", "gaps": gaps,
-                    "message": "missing must-have info; cannot proceed in --auto mode (no fabrication)"}
-        if _round == max_rounds:
-            return {"status": "incomplete", "gaps": gaps,
-                    "message": f"still missing after {max_rounds} rounds"}
-        answer = input_fn(consolidated_question(gaps, assessment) + "\n   your answer: ")
-        cur_desc = cur_desc + "\nAdditional details -> " + answer
-        assessment = assess_task(cur_desc)
-
-    resolved, assumptions = apply_defaults(assessment)
+        answer = input_fn(step.message + "\n   your answer: ")
+        conversation += [("agent", step.message, {"asks": step.asks}), ("user", answer)]
+    if step.kind == "off_topic":
+        return {"status": "rejected", "reason": step.reason}
+    if step.kind == "out_of_scope":
+        return {"status": "out_of_scope", "reason": step.reason}
+    if step.kind == "impossible":
+        return {"status": "impossible_geometry", "reason": step.reason}
+    if step.kind == "ask":
+        return {"status": "incomplete", "gaps": step.gaps, "conflicts": step.conflicts,
+                "reason": step.reason,
+                "message": ("missing or contradictory must-have info; cannot proceed in --auto mode "
+                            "(no fabrication, no guessing)") if auto
+                           else f"still unresolved after {max_rounds} rounds"}
     return {
         "status": "complete",
-        "resolved": resolved,
-        "assumptions": assumptions,
-        "completed_description": build_description(resolved),
-        "assessment": assessment.model_dump(),
+        "resolved": step.resolved,
+        "assumptions": step.assumptions,
+        "completed_description": step.completed,
+        "assessment": step.assessment.model_dump(),
     }
 
 
 def _print_result(result: dict) -> int:
     print()
+
+
+    print("-" * 64)
+    status = result["status"]
+    if status == "rejected":
+        print(f"REJECTED (off-topic): {result['reason']}")
+        print("=" * 64)
+        return 3
+    if status == "out_of_scope":
+        print(f"OUT OF SCOPE: {result['reason']}")
+        print("supported: a cantilever — one fixed end, a transverse point load at the free end.")
+        print("=" * 64)
+        return 4
+    if status == "incomplete":
+        print(f"INCOMPLETE: {result['message']}")
+        print(f"missing must-have: {', '.join(result['gaps']) or '-'}")
+        for q, options in result.get("conflicts", {}).items():
+            print(f"contradictory {q}: " + " vs ".join(f"'{quote}' = {v}" for v, quote in options))
+        print("=" * 64)
+        return 2
+    print("assumptions applied (deterministic defaults, disclosed):")
+    for a in result["assumptions"]:
+        print(f"  - {a}")
+    print("-" * 64)
+    print("completed problem definition (-> parameterize.py):")
+    print(f"  {result['completed_description']}")
+    print("-" * 64)
+    print("ACCEPTANCE: PASS (definition complete, no leftover ambiguity)")
+    print("=" * 64)
+    return 0
+
+
+def _selftest() -> int:
+    """Deterministic self-test of the policy/routing/material checks (no API)."""
+    print("task_understanding.py self-test (deterministic parts, no API)")
+    print("=" * 64)
+    ok = True
+
+    complete = TaskAssessment(is_fea_task=True, geometry_type="cantilever_beam",
+                              geometry_specified=True, L=100, h=10, b=10,
+                              material_specified=True, material_name="STEEL",
+                              fixed_specified=True, fixed_end="one end",
+                              load_specified=True, load_magnitude=1000, load_end="free end")
+    print(f"1) complete -> gaps {must_have_gaps(complete)} (expect [])")
+    ok = ok and must_have_gaps(complete) == []
+    resolved, assumptions = apply_defaults(complete)
+    print(f"   mesh default = {resolved['elem_size']} mm (expect 2.0)")
+    ok = ok and resolved["elem_size"] == 2.0
+    for a in assumptions:
+        print(f"     - {a}")
+    print(f"   completed: {build_description(resolved)}")
+
+    miss = TaskAssessment(is_fea_task=True, geometry_type="cantilever_beam",
+                              geometry_specified=True, L=100, h=10, b=10,
+                          material_specified=False, fixed_specified=True, load_specified=False)
+    print(f"2) missing material+load -> gaps {must_have_gaps(miss)} (expect material, load)")
+    ok = ok and set(must_have_gaps(miss)) == {"material", "load"}
+
+    off = TaskAssessment(is_fea_task=False, off_topic_reason="greeting")
+    print(f"3) off-topic is_fea_task = {off.is_fea_task} (expect False)")
+    ok = ok and off.is_fea_task is False
+
+    alu = TaskAssessment(is_fea_task=True, geometry_type="cantilever_beam",
+                              geometry_specified=True, L=100, h=10, b=10,
+                         material_specified=True, material_name="Alu",
+                         fixed_specified=True, load_specified=True, load_magnitude=1000)
+    g_alu = must_have_gaps(alu)
+    r_alu, _ = apply_defaults(alu)
+    print(f"4) material 'Alu' -> gaps {g_alu} (expect []); canonical -> {r_alu['material_name']} (expect ALUMINUM)")
+    ok = ok and g_alu == [] and r_alu["material_name"] == "ALUMINUM"
+
+    unk = TaskAssessment(is_fea_task=True, geometry_type="cantilever_beam",
+                              geometry_specified=True, L=100, h=10, b=10,
+                         material_specified=True, material_name="INCONEL",
+                         fixed_specified=True, load_specified=True, load_magnitude=1000)
+    print(f"5) material 'INCONEL' (not in library) -> gaps {must_have_gaps(unk)} (expect ['material'])")
+    print(f"   would ask: {_gap_line('material', unk)}")
+    ok = ok and must_have_gaps(unk) == ["material"]
+
     plate_ok = True
     full = TaskAssessment(is_fea_task=True, geometry_type="plate_with_hole",
                           geometry_specified=True, plate_a=200, plate_b=100, hole_r=20,
@@ -476,76 +855,51 @@ def _print_result(result: dict) -> int:
     plate_ok &= (g3 == [])
     ok = ok and plate_ok
 
-    print("-" * 64)
-    status = result["status"]
-    if status == "rejected":
-        print(f"REJECTED (off-topic): {result['reason']}")
-        print("=" * 64)
-        return 3
-    if status == "out_of_scope":
-        print(f"OUT OF SCOPE: {result['reason']}")
-        print("supported: a cantilever — one fixed end, a transverse point load at the free end.")
-        print("=" * 64)
-        return 4
-    if status == "incomplete":
-        print(f"INCOMPLETE: {result['message']}")
-        print(f"missing must-have: {', '.join(result['gaps'])}")
-        print("=" * 64)
-        return 2
-    print("assumptions applied (deterministic defaults, disclosed):")
-    for a in result["assumptions"]:
-        print(f"  - {a}")
-    print("-" * 64)
-    print("completed problem definition (-> parameterize.py):")
-    print(f"  {result['completed_description']}")
-    print("-" * 64)
-    print("ACCEPTANCE: PASS (definition complete, no leftover ambiguity)")
-    print("=" * 64)
-    return 0
+    # Mentions -> values, decided by code (no API: prepared reports).
+    conv = [("user", "cantilever_beam 1000mm long"),
+            ("agent", "geometry: length L, height h, width b in mm (e.g. 100 x 10 x 10)", {"asks": []}),
+            ("user", "200 x 20 x10, Steel, left side fixed, load on the other side 1500N")]
+    def report(*mentions, **kw):
+        return LLMReport(is_fea_task=True, geometry_type="cantilever_beam", fixed_specified=True,
+                         load_specified=True,
+                         mentions=[Mention(quantity=q, value=v if q != "material" else None,
+                                           material=v if q == "material" else None,
+                                           quote=quote, turn=t) for q, v, quote, t in mentions], **kw)
+    stated = [("L", 1000.0, "1000mm long", 1), ("L", 200.0, "200 x 20 x10", 2),
+              ("h", 20.0, "200 x 20 x10", 2), ("b", 10.0, "200 x 20 x10", 2),
+              ("material", "Steel", "Steel", 2), ("load", 1500.0, "1500N", 2)]
+    step = understand(conv, report(*stated))
+    print(f"9) length stated twice -> {step.kind}, asks {step.asks}")
+    print(f"   {step.message.splitlines()[0]}")
+    mention_ok = (step.kind == "ask" and step.asks == ["L"] and "'1000mm long'" in step.message
+                  and "'200 x 20 x10'" in step.message and step.gaps == [])
 
+    conv2 = conv + [("agent", step.message, {"asks": step.asks}), ("user", "200 mm")]
+    step2 = understand(conv2, report(*stated, ("L", 200.0, "200 mm", 3)))
+    r2 = step2.resolved or {}
+    print(f"10) answered '200 mm' -> {step2.kind}, L={r2.get('L')} h={r2.get('h')} b={r2.get('b')} (expect ready 200/20/10)")
+    mention_ok &= step2.kind == "ready" and (r2.get("L"), r2.get("h"), r2.get("b")) == (200.0, 20.0, 10.0)
 
-def _selftest() -> int:
-    """Deterministic self-test of the policy/routing/material checks (no API)."""
-    print("task_understanding.py self-test (deterministic parts, no API)")
-    print("=" * 64)
-    ok = True
+    step3 = understand(conv, report(("L", 100.0, "100 x 10 x 10", 2), ("h", 10.0, "100 x 10 x 10", 2),
+                                    ("b", 10.0, "100 x 10 x 10", 2), ("material", "Steel", "Steel", 2),
+                                    ("load", 1500.0, "1500N", 2)))
+    print(f"11) a value quoted from the assistant's example -> dropped {len(step3.dropped)}, "
+          f"{step3.kind} {step3.gaps} (expect 3 dropped, ask ['geometry'])")
+    mention_ok &= len(step3.dropped) == 3 and step3.kind == "ask" and step3.gaps == ["geometry"]
 
-    complete = TaskAssessment(is_fea_task=True, geometry_specified=True, L=100, h=10, b=10,
-                              material_specified=True, material_name="STEEL",
-                              fixed_specified=True, fixed_end="one end",
-                              load_specified=True, load_magnitude=1000, load_end="free end")
-    print(f"1) complete -> gaps {must_have_gaps(complete)} (expect [])")
-    ok = ok and must_have_gaps(complete) == []
-    resolved, assumptions = apply_defaults(complete)
-    print(f"   mesh default = {resolved['elem_size']} mm (expect 2.0)")
-    ok = ok and resolved["elem_size"] == 2.0
-    for a in assumptions:
-        print(f"     - {a}")
-    print(f"   completed: {build_description(resolved)}")
+    step4 = understand([("user", "an alu cantilever 100 x 10 x 10, aluminium, 1 kN at the tip")],
+                       report(("material", "alu", "alu", 1), ("material", "aluminium", "aluminium", 1),
+                              ("L", 100.0, "100 x 10 x 10", 1), ("h", 10.0, "100 x 10 x 10", 1),
+                              ("b", 10.0, "100 x 10 x 10", 1), ("load", 1000.0, "1 kN", 1)))
+    print(f"12) 'alu' and 'aluminium' -> {step4.kind}, material {(step4.resolved or {}).get('material_name')} "
+          f"(expect ready ALUMINUM: one material, two spellings)")
+    mention_ok &= step4.kind == "ready" and step4.resolved["material_name"] == "ALUMINUM"
 
-    miss = TaskAssessment(is_fea_task=True, geometry_specified=True, L=100, h=10, b=10,
-                          material_specified=False, fixed_specified=True, load_specified=False)
-    print(f"2) missing material+load -> gaps {must_have_gaps(miss)} (expect material, load)")
-    ok = ok and set(must_have_gaps(miss)) == {"material", "load"}
-
-    off = TaskAssessment(is_fea_task=False, off_topic_reason="greeting")
-    print(f"3) off-topic is_fea_task = {off.is_fea_task} (expect False)")
-    ok = ok and off.is_fea_task is False
-
-    alu = TaskAssessment(is_fea_task=True, geometry_specified=True, L=100, h=10, b=10,
-                         material_specified=True, material_name="Alu",
-                         fixed_specified=True, load_specified=True, load_magnitude=1000)
-    g_alu = must_have_gaps(alu)
-    r_alu, _ = apply_defaults(alu)
-    print(f"4) material 'Alu' -> gaps {g_alu} (expect []); canonical -> {r_alu['material_name']} (expect ALUMINUM)")
-    ok = ok and g_alu == [] and r_alu["material_name"] == "ALUMINUM"
-
-    unk = TaskAssessment(is_fea_task=True, geometry_specified=True, L=100, h=10, b=10,
-                         material_specified=True, material_name="INCONEL",
-                         fixed_specified=True, load_specified=True, load_magnitude=1000)
-    print(f"5) material 'INCONEL' (not in library) -> gaps {must_have_gaps(unk)} (expect ['material'])")
-    print(f"   would ask: {_gap_line('material', unk)}")
-    ok = ok and must_have_gaps(unk) == ["material"]
+    step5 = understand([("user", "a beam calculation")],
+                       LLMReport(is_fea_task=True, in_scope=True, geometry_type=None))
+    print(f"13) 'a beam calculation' -> {step5.kind} {step5.gaps} (expect ask ['geometry_type'], not out of scope)")
+    mention_ok &= step5.kind == "ask" and step5.gaps == ["geometry_type"]
+    ok = ok and mention_ok
 
     print("-" * 64)
     print(f"ACCEPTANCE: {'PASS' if ok else 'FAIL'}")

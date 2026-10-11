@@ -3,8 +3,8 @@
 so DEMO_MODE can replay the "vague request -> agent clarifies -> ready" exchange before
 the dashboard (no key needed at replay time -- this records it once, with the real LLM).
 
-Mirrors app.py::_branch exactly (assess -> reject / decline / ask gaps / ready) so the
-replayed bubbles match live behaviour. Needs the fea env + the OpenRouter key in .env.
+Calls the same task_understanding.understand() as app.py::_branch, so the replayed
+bubbles match live behaviour. Needs the fea env + the OpenRouter key in .env.
 
 Usage:  python record_chat.py
 """
@@ -44,45 +44,22 @@ SCRIPTS = {
 }
 
 
-def _branch_capture(accum: str, chat: list) -> str:
-    """Same control flow as app.py::_branch, but appends to a local chat list."""
-    a = tu.assess_task(accum)
-    if not a.is_fea_task:
-        chat.append(("agent",
-            f"That doesn't look like a beam FEA problem ({a.off_topic_reason or 'off-topic'}). "
-            "Try e.g. 'a steel cantilever 100 mm, 10x10 mm, fixed one end, 1000 N down at the tip'."))
-        return "chatting"
-    if not a.in_scope:
-        chat.append(("agent",
-            f"That's beyond what I can model yet — {a.scope_note or 'unsupported configuration'}. "
-            "I handle two geometries: a cantilever beam (one end fixed, a single transverse "
-            "point load at the free end), and a flat plate with one circular hole pulled in "
-            "tension. Want to try one of those?"))
-        return "chatting"
-    gaps = tu.must_have_gaps(a)
-    if gaps:
-        chat.append(("agent", tu.consolidated_question(gaps, a)))
-        return "chatting"
-    _resolved, assumptions = tu.apply_defaults(a)
-    note = "; ".join(assumptions[:2]) + ("…" if len(assumptions) > 2 else "")
-    chat.append(("agent", f"✓ Understood — assumed {note}. Running the pipeline…"))
-    return "ready"
-
-
 def record(name: str, vague: str, details: str) -> None:
+    """The vague turn, the agent's reply, and -- unless that already sufficed --
+    the details turn and the agent's reply to it: what the dashboard would show."""
     (DEMO / name).mkdir(parents=True, exist_ok=True)   # do not depend on record_demo running first
     chat: list = [("user", vague)]
-    accum = vague
-    phase = _branch_capture(accum, chat)
-    if phase != "ready":
+    step = tu.understand(chat)
+    chat.append(("agent", step.message, {"asks": step.asks}))
+    if step.kind != "ready":
         chat.append(("user", details))
-        accum = accum + "\nAdditional details -> " + details
-        phase = _branch_capture(accum, chat)
+        step = tu.understand(chat)
+        chat.append(("agent", step.message, {"asks": step.asks}))
     (DEMO / name / "chat.json").write_text(
-        json.dumps([{"role": r, "text": t} for r, t in chat], indent=2, ensure_ascii=False))
-    print(f"recorded {name:<16} phase={phase}  turns={len(chat)}")
-    for r, t in chat:
-        print(f"    {r:<5}: {t[:90]}{'…' if len(t) > 90 else ''}")
+        json.dumps([{"role": e[0], "text": e[1]} for e in chat], indent=2, ensure_ascii=False))
+    print(f"recorded {name:<16} {step.kind}  turns={len(chat)}")
+    for e in chat:
+        print(f"    {e[0]:<5}: {e[1][:90]}{'…' if len(e[1]) > 90 else ''}")
 
 
 def main() -> int:
