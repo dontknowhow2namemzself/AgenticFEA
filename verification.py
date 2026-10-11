@@ -144,18 +144,21 @@ def _select_reference(params: dict, use_rag: bool = True) -> tuple:
     return select_reference_case(params), "deterministic scan (retrieval disabled for batch)"
 
 
-def _validity(params: dict, sigma: float, sigma_what: str, delta: float = None,
-              length: float = None) -> list:
+def _validity(params: dict, sigma: float, sigma_what: str, thickness: float,
+              delta: float = None, length: float = None) -> list:
     """Is the linear-elastic, small-deflection model valid for this result?
 
-    Returns [{"name", "status" (OK | EXCEEDED | NOT CHECKED), "detail"}, ...].
+    `thickness` is the governing thickness [mm] that picks the yield strength's
+    band. Returns [{"name", "status" (OK | EXCEEDED | NOT CHECKED), "detail"}, ...].
     """
     checks = []
     material = params["material"]["name"]
-    fy = yield_strength(material)
+    fy = yield_strength(material, thickness)
     if fy is None:
         checks.append({"name": "stress below yield", "status": "NOT CHECKED",
                        "detail": f"no yield strength for {material} in the materials library"})
+    elif fy[0] is None:
+        checks.append({"name": "stress below yield", "status": "NOT CHECKED", "detail": fy[1]})
     else:
         fy_value, source = fy
         ok = sigma <= fy_value
@@ -253,7 +256,7 @@ def _verify_plate(params: dict, paths: RunPaths, use_rag: bool = True) -> tuple:
                            f"({xc}, {yc}) mm | 2D plane stress | F={F} N"),
             # The hole peak converges (unlike the beam's clamped corner), so it is
             # a fair stress to hold against the yield strength.
-            "validity": _validity(params, sigma_max, "peak von Mises on the hole")}
+            "validity": _validity(params, sigma_max, "peak von Mises on the hole", thickness=t)}
     overall_ok = judged["status"] != "FAIL"
     return overall_ok, judged, recorded, meta
 
@@ -294,8 +297,9 @@ def _verify_beam(params: dict, paths: RunPaths, use_rag: bool = True) -> tuple:
     sigma_nominal = 6.0 * P * L / (b * h ** 2)
     meta = {"frd": str(paths.frd), "geom": "cantilever_beam", "L": L, "h": h, "b": b,
             "model_line": f"cantilever_beam | static | linear elastic | L={L} h={h} b={b} mm",
+            # A solid rectangular bar's governing thickness is its smaller side.
             "validity": _validity(params, sigma_nominal, "nominal bending stress at the clamp, "
-                                  "M c / I", delta=delta_fem, length=L)}
+                                  "M c / I", thickness=min(h, b), delta=delta_fem, length=L)}
     overall_ok = disp["status"] != "FAIL"   # PASS or N/A -> chain ok; FAIL -> diagnostics
     return overall_ok, disp, stress, meta
 

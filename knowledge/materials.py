@@ -27,12 +27,17 @@ MATERIALS = {
 }
 
 # Yield strength fy [MPa], used only to check that a linear-elastic result has
-# stayed elastic (verification.py). Each value says which grade it stands for
-# and where it comes from; a material without an entry is reported as "not
-# checked", never given a guessed value.
+# stayed elastic (verification.py). Each entry names the grade it stands for,
+# its thickness bands and its source; a material without an entry, or a
+# thickness beyond its bands, is reported as "not checked", never guessed.
+#
+# STEEL is S355 with the nominal values of EN 1993-1-1:2005, Table 3.1. That
+# table is the code's simplification of the product standard (EN 10025-2,
+# which steps 355 / 345 / 335 MPa at 16 / 40 / 63 mm); a National Annex may
+# prescribe the product standard instead -- the UK's does.
 YIELD = {
-    "STEEL": (355.0, "STEEL taken as structural steel S355: fy = 355 MPa for t <= 40 mm "
-                     "(EN 1993-1-1:2005, Table 3.1)"),
+    "STEEL": {"grade": "S355", "source": "EN 1993-1-1:2005, Table 3.1",
+              "bands": ((40.0, 355.0), (80.0, 335.0))},     # (t up to [mm], fy [MPa])
 }
 
 # Common aliases / spellings -> canonical key (the LLM usually normalizes names,
@@ -68,7 +73,19 @@ def material_names() -> list:
     return sorted(MATERIALS.keys())
 
 
-def yield_strength(name: str):
-    """(fy in MPa, its grade and source) for a library material, or None."""
+def yield_strength(name: str, thickness: float):
+    """(fy in MPa or None, the note saying where it comes from) for a library
+    material at a governing thickness [mm]; None if the material has no entry."""
     canonical, _props = resolve_material(name)
-    return YIELD.get(canonical) if canonical else None
+    entry = YIELD.get(canonical) if canonical else None
+    if entry is None:
+        return None
+    t_min = 0.0
+    for t_max, fy in entry["bands"]:
+        if thickness <= t_max:
+            band = f"t <= {t_max:g} mm" if t_min == 0 else f"{t_min:g} < t <= {t_max:g} mm"
+            return fy, (f"{canonical} taken as {entry['grade']}: fy = {fy:g} MPa at t = {thickness:g} mm "
+                        f"({band}; {entry['source']})")
+        t_min = t_max
+    return None, (f"{canonical} taken as {entry['grade']}: t = {thickness:g} mm is beyond the "
+                  f"{entry['bands'][-1][0]:g} mm that {entry['source']} covers")
