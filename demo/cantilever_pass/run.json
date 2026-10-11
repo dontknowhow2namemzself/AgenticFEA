@@ -257,7 +257,7 @@
         },
         {
           "text": "Exported interactive 3D view",
-          "data": "6300 triangles \u00b7 2100 element edges",
+          "data": "1050 element faces \u00b7 2100 element edges",
           "status": "pass"
         },
         {

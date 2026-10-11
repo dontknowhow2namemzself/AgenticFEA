@@ -124,7 +124,7 @@ def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
     view_artifact = ([{"kind": "viewer3d", "title": "interactive 3D", "path": view["path"]}]
                      if view else [])
     view_action = {"text": "Exported interactive 3D view",
-                   "data": (f"{view['n_triangles']} triangles · {view['n_edges']} element edges"
+                   "data": (f"{view['n_faces']} element faces · {view['n_edges']} element edges"
                             if view else post.get("viewer_error", "")),
                    "status": "pass" if view else "fail"}
     return dict(

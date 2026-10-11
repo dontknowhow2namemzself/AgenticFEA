@@ -234,8 +234,9 @@ def report_and_check(s: dict) -> bool:
         print(f"     fallback: open {s['vtu_path']} in the ParaView GUI (human path).")
     v = s["viewer"]
     if v:
-        print(f"3D view  : {Path(v['path']).name}  ({v['kbytes']:.0f} KB; {v['n_triangles']} "
-              f"triangles, {v['n_edges']} element edges)")
+        print(f"3D view  : {Path(v['path']).name}  ({v['kbytes']:.0f} KB; {v['n_faces']} element "
+              f"faces, {v['n_edges']} element edges; a browser draws the faces as "
+              f"{v['n_triangles']} triangles)")
     else:
         print(f"  !! 3D view export error: {s['viewer_error']}")
 
