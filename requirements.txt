@@ -4,7 +4,8 @@
 # Create the env with the solver, then install these into it:
 #   mamba create -n fea -c conda-forge python=3.12 calculix
 #   conda activate fea
-#   pip install -r requirements.txt
+#   pip install -r requirements.txt              (pipeline + dashboard)
+#   pip install -r requirements-surrogate.txt    (+ PyTorch, to train/evaluate the CNN)
 
 # LLM (semantics) + config
 openai==2.43.0            # OpenRouter via the OpenAI-compatible SDK (chat + embeddings)
@@ -17,9 +18,8 @@ ccx2paraview==3.2.0       # CalculiX .frd -> .vtu
 pyvista==0.48.4           # off-screen 3D rendering (mesh + stress/displacement)
 numpy==2.4.6              # numerics
 
-# Surrogate model (the CNN half; MPS-accelerated on Apple silicon)
-torch==2.13.0             # UNet training / inference
-matplotlib==3.11.0        # result figures (scatter, fields, convergence)
+# Figures: the PNG renders' colormap, the surrogate's result figures
+matplotlib==3.11.0
 
 # Retrieval (RAG) + dashboard
 chromadb==1.5.9           # vector store for reference / knowledge retrieval

@@ -1,0 +1,5 @@
+# The CNN stress-field surrogate (surrogate/): everything in requirements.txt
+# plus PyTorch. Kept apart because it is the one heavy dependency, and nothing
+# in the pipeline or the dashboard imports it.
+-r requirements.txt
+torch==2.13.0             # UNet training / inference (MPS-accelerated on Apple silicon)

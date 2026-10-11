@@ -111,7 +111,8 @@ These are what make the system trustworthy — and are the core of its **AI‑sa
 # 1) Environment (conda‑forge provides the ccx solver binary)
 mamba create -n fea -c conda-forge python=3.12 calculix
 conda activate fea
-pip install -r requirements.txt
+pip install -r requirements.txt            # pipeline + dashboard
+pip install -r requirements-surrogate.txt  # optional: + PyTorch for the CNN surrogate
 
 # 2) API key (never committed — .env is gitignored)
 cp .env.example .env            # then put your OPENROUTER_API_KEY in .env
