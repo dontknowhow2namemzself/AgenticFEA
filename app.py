@@ -173,7 +173,7 @@ def stage_bar_html(stage_list: list, sel=None) -> str:
 
 
 # ---------------- command console: a clarification chat (live) ----------------
-for _k, _v in {"run": None, "stage": 0, "chat": [], "accum": "",
+for _k, _v in {"run": None, "stage": 0, "chat": [], "since": 0,
                "phase": "chatting", "completed": None, "thinking": False,
                "demo_chat": [], "demo_step": 0,
                "mode": "replay" if DEMO_MODE else "live"}.items():
@@ -183,54 +183,35 @@ REPLAY = st.session_state.mode == "replay"
 
 def _switch_mode():
     """Each mode starts clean: a fresh chat, or the first recorded example."""
-    for k, v in {"run": None, "stage": 0, "chat": [], "accum": "", "phase": "chatting",
+    for k, v in {"run": None, "stage": 0, "chat": [], "since": 0, "phase": "chatting",
                  "completed": None, "thinking": False, "pick": None,
                  "demo_chat": [], "demo_step": 0}.items():
         st.session_state[k] = v
 
 
-def _branch(accum: str):
-    """Layer-1 assessment + branch (IN-THREAD, LLM only). The user message is
-    already in the chat; this assesses the accumulated text and replies."""
+def _branch():
+    """Layer 1 on the conversation so far (IN-THREAD, LLM only). The user's
+    message is already in the chat; this reads the conversation since the
+    current problem began and appends the reply.
+
+    The chat is handed over as a conversation, not glued into one string, so
+    the model can see which question each answer replies to -- and the reply's
+    meta records what it asked the user to settle (task_understanding.resolve).
+    """
     import task_understanding as tu
+    chat = st.session_state.chat
     try:
-        a = tu.assess_task(accum)
+        step = tu.understand(chat[st.session_state.since:])
     except Exception as exc:  # noqa: BLE001
-        st.session_state.chat.append(("agent", run_guard.BUDGET_MESSAGE if run_guard.budget_exhausted(exc)
-                                      else f"(could not reach the model: {exc.__class__.__name__})"))
+        chat.append(("agent", run_guard.BUDGET_MESSAGE if run_guard.budget_exhausted(exc)
+                     else f"(could not reach the model: {exc.__class__.__name__})"))
         return
-    if not a.is_fea_task:
-        st.session_state.chat.append(("agent",
-            f"That doesn't look like a beam FEA problem ({a.off_topic_reason or 'off-topic'}). "
-            "Try e.g. 'a steel cantilever 100 mm, 10x10 mm, fixed one end, 1000 N down at the tip'."))
-        st.session_state.accum = ""
-        return
-    if not a.in_scope:
-        st.session_state.chat.append(("agent",
-            f"That's beyond what I can model yet — {a.scope_note or 'unsupported configuration'}. "
-            "I handle two geometries: a cantilever beam (one end fixed, a single transverse "
-            "point load at the free end), and a flat plate with one circular hole pulled in "
-            "tension. Want to try one of those?"))
-        st.session_state.accum = ""
-        return
-    impossible = tu.geometry_impossible(a)
-    if impossible:
-        # Reported, never repaired. Adjusting the user's numbers to make the
-        # geometry valid would answer a different question than the one asked.
-        st.session_state.chat.append(("agent",
-            f"That geometry cannot exist as described — {impossible}\n\n"
-            "Tell me corrected numbers and I will run it."))
-        st.session_state.accum = ""
-        return
-    gaps = tu.must_have_gaps(a)
-    if gaps:
-        st.session_state.chat.append(("agent", tu.consolidated_question(gaps, a)))
-        return
-    resolved, assumptions = tu.apply_defaults(a)
-    st.session_state.completed = tu.build_description(resolved)
-    note = "; ".join(assumptions[:2]) + ("…" if len(assumptions) > 2 else "")
-    st.session_state.chat.append(("agent", f"✓ Understood — assumed {note}. Running the pipeline…"))
-    st.session_state.phase = "ready"
+    chat.append(("agent", step.message, {"asks": step.asks}))
+    if step.kind in ("off_topic", "out_of_scope"):
+        st.session_state.since = len(chat)        # the next message starts a new problem
+    elif step.kind == "ready":
+        st.session_state.completed = step.completed
+        st.session_state.phase = "ready"
 
 
 def _bubble(role: str, text: str):
@@ -273,11 +254,11 @@ with st.container(border=True):
             st.markdown(f'<div class="query">&ldquo;{st.session_state.run["description"]}&rdquo;</div>',
                         unsafe_allow_html=True)
     else:
-        for _role, _text in st.session_state.chat:
+        for _role, _text, *_ in st.session_state.chat:
             _bubble(_role, _text)
         if st.session_state.thinking:
             with st.spinner("understanding…"):           # shown ABOVE the input, like agent replies
-                _branch(st.session_state.accum)
+                _branch()
             st.session_state.thinking = False
             st.rerun()
         elif st.session_state.phase == "chatting":
@@ -286,15 +267,13 @@ with st.container(border=True):
                                       placeholder="describe your beam problem, or answer the question…")
                 if st.form_submit_button("send") and reply.strip():
                     st.session_state.chat.append(("user", reply.strip()))
-                    st.session_state.accum = (reply.strip() if not st.session_state.accum
-                                              else st.session_state.accum + "\nAdditional details -> " + reply.strip())
                     st.session_state.thinking = True
                     st.rerun()
         elif st.session_state.phase == "done":
             if st.button("↻ new problem"):
                 st.session_state.run = None
                 st.session_state.chat = []
-                st.session_state.accum = ""
+                st.session_state.since = 0
                 st.session_state.completed = None
                 st.session_state.phase = "chatting"
                 st.session_state.stage = 0

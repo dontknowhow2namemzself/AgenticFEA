@@ -36,7 +36,7 @@ That inversion is the point: each geometry is judged on the quantity its own phy
 
 | # | Layer | Responsibility | Owner |
 |---|---|---|---|
-| 1 | **Task understanding** | NL → unambiguous problem definition; off‑topic guard; ask for missing must‑haves, disclose assumed defaults | LLM (semantics) |
+| 1 | **Task understanding** | NL → unambiguous problem definition; off‑topic guard; ask for missing must‑haves and, in the user's own words, for any value given twice differently; disclose assumed defaults | LLM reads · code decides the values |
 | 2 | **Parameterization** | Fill a `set_params` tool → Pydantic validation → `params.py`; material **name → SI‑mm library** | LLM fills · code validates |
 | 3 | **Pre‑processing** | `gmsh` box + neutral face labels → FIXED/LOAD mapping → CalculiX `.inp` (incl. Gmsh→CalculiX C3D20 node remap) | deterministic code |
 | 4 | **Solve** | run CalculiX `ccx`; fill the Apple‑silicon performance cores | CalculiX |
@@ -94,7 +94,7 @@ These are what make the system trustworthy — and are the core of its **AI‑sa
 
 ## Tech stack
 
-- **LLM** — OpenRouter (OpenAI‑compatible API), model `openai/gpt-5.4`, **function/tool calling** with Pydantic‑generated JSON schemas; key via `.env`.
+- **LLM** — OpenRouter (OpenAI‑compatible API), model `openai/gpt-6-luna` (the cheapest that passes `eval_understanding.py`), **function/tool calling** with Pydantic‑generated JSON schemas; key via `.env`.
 - **Validation** — Pydantic v2.
 - **Geometry & mesh** — Gmsh (Python API), structured C3D20R hexahedra.
 - **Solver** — CalculiX `ccx`.
@@ -181,16 +181,17 @@ Three recorded examples ship with it. The **plate** one is deliberately phrased 
 
 From that sentence the language layer resolves `aluminium → ALUMINUM` (E, ν, ρ then come from the curated library, never from the model), halves the **diameter** into the radius the schema wants (`r = 18`), converts **4.5 kN → 4500 N**, and reads *"right in the middle"* as a position it should leave unset so the centred default applies — reporting the centre it assumed, the 1 mm thickness it assumed and why, and the support model it applied, rather than applying any of them silently. The run then verifies at **0.551 %** against the Howland reference.
 
-A dark "control‑room" UI. A clarification chat resolves the request (asks for missing must‑haves, guards scope), then a clickable eight‑stage bar walks the run: the **left** panel is the action flow, the **right** panel holds the artifacts — an annotated mesh (FIXED/LOAD read straight from the `.inp`), stress/displacement plots, the RAG‑selected reference, and the acceptance reports. Post‑processing leads with an **interactive 3D view**: the result field on the model with the real element edges drawn over it (a quadratic edge is drawn through its midside node, so the hole's edges are curved, not chorded), menus inside the figure for the field and the deformed shape, and the nodal value on hover. The fixed PNG views below it are drawn from the same data with the same edges, rainbow fringe and min–max range, so the bar of a field carries the same numbers in both. When the dashboard runs on your own machine and ParaView is installed, a live run also offers **open in ParaView**: it starts ParaView on the run's `.vtu` with the same field, colours, range and camera, and the deformed shape one click away — for slicing, probing and the solid's interior. DEMO mode replays the snapshots in `demo/` — including the opening clarification dialogue — so it runs with no key and no solver:
+A dark "control‑room" UI. A clarification chat resolves the request (asks which geometry when that is not yet clear, asks for missing must‑haves, quotes back any value given twice with different numbers, guards scope), then a clickable eight‑stage bar walks the run: the **left** panel is the action flow, the **right** panel holds the artifacts — an annotated mesh (FIXED/LOAD read straight from the `.inp`), stress/displacement plots, the RAG‑selected reference, and the acceptance reports. Post‑processing leads with an **interactive 3D view**: the result field on the model with the real element edges drawn over it (a quadratic edge is drawn through its midside node, so the hole's edges are curved, not chorded), menus inside the figure for the field and the deformed shape, and the nodal value on hover. The fixed PNG views below it are drawn from the same data with the same edges, rainbow fringe and min–max range, so the bar of a field carries the same numbers in both. When the dashboard runs on your own machine and ParaView is installed, a live run also offers **open in ParaView**: it starts ParaView on the run's `.vtu` with the same field, colours, range and camera, and the deformed shape one click away — for slicing, probing and the solid's interior. DEMO mode replays the snapshots in `demo/` — including the opening clarification dialogue — so it runs with no key and no solver:
 `cantilever_pass` (verified against beam theory), `plate_pass` (the exchange above), and `stubby_fail` (a beam too stubby for the theory, where the diagnostics agent correctly blames the theory rather than the solver).
 
 ---
 
 ## Validation & results
 
-- **Tip deflection vs analytical:** 1.9058 mm (FEM) vs 1.9048 mm (Euler–Bernoulli `PL³/3EI`) → **0.056 % error** (tolerance 5 %).
+- **Tip deflection vs analytical:** 1.9058 mm (FEM) vs 1.9048 mm (Euler–Bernoulli `PL³/3EI`) → **0.056 % error** (tolerance 5 %). This textbook load is itself beyond yield for S355 (600 MPa nominal bending stress) and the run says so: see the validity check below.
 - **Physics sanity:** force balance residual 0.000 %, moment balance 0.000 %, strain energy > 0, displacement downward — all pass.
 - **Validity of the linear‑elastic model, checked beside the verdict:** agreement with the reference shows only that the solver and the theory agree under the assumptions they share. Two deterministic checks say whether those assumptions hold: the stress stays below yield (each material carries a yield strength with its grade and source — steel is taken as S355, fy = 355 MPa, EN 1993‑1‑1 Table 3.1; a material without one is reported as not checked), and the beam's deflection stays small, δ/L ≤ 0.10, where the linear theory is within 1 % of the exact large‑deflection solution (4 % at 0.20, 12 % at 0.36). A result outside them keeps its verdict against the reference but is flagged ⚠ in amber.
+- **Language layer, measured:** `eval_understanding.py` drives 14 scripted conversations through layer 1 against a real model — a value given twice with different numbers, units to convert, a diameter instead of a radius, a vague opener, an impossible plate and its correction, the assistant's own example values that must not be taken as the user's. The model only reports *where* the user stated each quantity, quoting them; code decides the value, and asks back when two statements disagree. Before that, a length given twice was settled silently by the model (15 calls on one conversation, none flagged it, and the length chosen depended on the model). Now the cheapest model tested passes all 14 cases on three repeats.
 - **Diagnostics, validated on an induced failure:** a stubby beam (L/h = 2) makes the FEM deflection exceed beam theory by ~20 %; the agent correctly diagnoses *"Euler–Bernoulli invalid for a non‑slender beam — transverse shear, not a solver or mesh bug,"* with high confidence and a sound fix — it never executes anything.
 
 | annotated mesh + BCs | von Mises stress | deformed shape (×5) |
@@ -254,6 +255,7 @@ One thing the surrogate is *not* limited by is the material. All 545 cases are s
 params.py                       # validated parameters — single source of truth
 schema.py                       # Pydantic validation (+ SI‑mm magnitude guards)
 task_understanding.py           # layer 1 — NL understanding / clarification
+eval_understanding.py           # layer 1 measured: scripted conversations vs a real model
 parameterize.py                 # layer 2 — set_params tool (LLM) → validate → params.py
 knowledge/
   materials.py                  # SI‑mm materials library (name → E/ν/ρ)
