@@ -38,7 +38,7 @@ YIELD = {
 # Common aliases / spellings -> canonical key (the LLM usually normalizes names,
 # this is just a safety net).
 _ALIASES = {
-    "MILD_STEEL": "STEEL", "CARBON_STEEL": "STEEL", "A36": "STEEL",
+    "MILD_STEEL": "STEEL", "CARBON_STEEL": "STEEL",
     "STAINLESS": "STAINLESS_STEEL", "SS": "STAINLESS_STEEL",
     "AL": "ALUMINUM", "ALU": "ALUMINUM", "ALUM": "ALUMINUM", "ALUMINIUM": "ALUMINUM",
     "CU": "COPPER", "TI": "TITANIUM", "MG": "MAGNESIUM",
