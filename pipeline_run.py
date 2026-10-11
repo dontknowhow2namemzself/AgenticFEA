@@ -14,8 +14,11 @@ always produced by deterministic code; the LLM only fills slots / selects / expl
 
 from __future__ import annotations
 
+import os
+import platform
 import pprint
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -68,6 +71,31 @@ def _diagnose(stage: str, params: dict, paths: RunPaths) -> dict:
 
 
 STAGE_ORDER = ["understand", "parameterize", "preprocess", "solve", "physics", "postprocess", "verify"]
+
+
+def host_label() -> str:
+    """The machine this run is on, e.g. 'Apple M5 · 10 cores · 32 GB'.
+
+    Read from the machine rather than written down, so a run reports where it
+    actually ran. Anything that cannot be read is left out.
+    """
+    chip, mem = "", 0
+    try:
+        if sys.platform == "darwin":
+            q = lambda key: subprocess.run(["sysctl", "-n", key], capture_output=True,
+                                           text=True).stdout.strip()
+            chip, mem = q("machdep.cpu.brand_string"), int(q("hw.memsize") or 0)
+        else:
+            info = Path("/proc/cpuinfo").read_text()
+            chip = next((l.split(":", 1)[1].strip() for l in info.splitlines()
+                         if l.startswith("model name")), "")
+            kib = next(l.split()[1] for l in Path("/proc/meminfo").read_text().splitlines()
+                       if l.startswith("MemTotal"))
+            mem = int(kib) * 1024
+    except (OSError, ValueError, StopIteration):
+        pass
+    parts = [chip or platform.machine(), f"{os.cpu_count()} cores"]
+    return " · ".join(parts + ([f"{round(mem / 2**30)} GB"] if mem else []))
 
 
 def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
@@ -128,7 +156,7 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
     emit = emit or (lambda *a: None)   # emit(stage_id, phase) for live progress
     rec = {"run_id": run_id, "description": description, "status": "complete", "verdict": "—",
            "stages": [], "diagnosis": None, "workdir": str(paths.root),
-           "meta": {"solver": "CalculiX ccx · SPOOLES", "units": "SI-mm", "host": "M5 / 32GB arm64"}}
+           "meta": {"solver": "CalculiX ccx · SPOOLES", "units": "SI-mm", "host": host_label()}}
 
     def stage(**kw):
         kw.setdefault("actions", []); kw.setdefault("data", {})

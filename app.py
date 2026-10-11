@@ -7,8 +7,12 @@ shows its agent-style action flow (left) and its artifacts (right), with the
 verbatim acceptance report one click away.
 
 Modes:
-  live      (default)  -- type a problem, run the real pipeline (needs fea + key)
-  DEMO_MODE=1          -- replay pre-recorded demo/ snapshots (no key, no solver)
+  live      (default)  -- type a problem, run the real pipeline (needs fea + key);
+                          a switch in the header also replays the recorded examples
+  DEMO_MODE=1          -- replay only: the pre-recorded demo/ snapshots (no key, no solver)
+
+Shared use: live runs can be limited (at once, per user per day) and old run
+directories pruned through environment settings -- see run_guard.py.
 
 Design: a control room, not a SaaS. Dark, monospace, three signal colours --
 amber = running, green = passed, red = verification failed.
@@ -26,12 +30,13 @@ from pathlib import Path
 import streamlit as st
 
 import paraview_open
+import run_guard
 import viewer
 from paths import RunPaths
 
 HERE = Path(__file__).resolve().parent
 DEMO_DIR = HERE / "demo"
-DEMO_MODE = os.environ.get("DEMO_MODE", "0") == "1"
+DEMO_MODE = os.environ.get("DEMO_MODE", "0") == "1"     # replay only, no live switch
 DEFAULT_DESC = ("A steel cantilever beam 100 mm long, 10x10 mm square section, "
                 "fixed at one end, with a 1000 N downward load at the free end.")
 
@@ -169,8 +174,18 @@ def stage_bar_html(stage_list: list, sel=None) -> str:
 # ---------------- command console: a clarification chat (live) ----------------
 for _k, _v in {"run": None, "stage": 0, "chat": [], "accum": "",
                "phase": "chatting", "completed": None, "thinking": False,
-               "demo_chat": [], "demo_step": 0}.items():
+               "demo_chat": [], "demo_step": 0,
+               "mode": "replay" if DEMO_MODE else "live"}.items():
     st.session_state.setdefault(_k, _v)
+REPLAY = st.session_state.mode == "replay"
+
+
+def _switch_mode():
+    """Each mode starts clean: a fresh chat, or the first recorded example."""
+    for k, v in {"run": None, "stage": 0, "chat": [], "accum": "", "phase": "chatting",
+                 "completed": None, "thinking": False, "pick": None,
+                 "demo_chat": [], "demo_step": 0}.items():
+        st.session_state[k] = v
 
 
 def _branch(accum: str):
@@ -180,7 +195,8 @@ def _branch(accum: str):
     try:
         a = tu.assess_task(accum)
     except Exception as exc:  # noqa: BLE001
-        st.session_state.chat.append(("agent", f"(could not reach the model: {exc.__class__.__name__})"))
+        st.session_state.chat.append(("agent", run_guard.BUDGET_MESSAGE if run_guard.budget_exhausted(exc)
+                                      else f"(could not reach the model: {exc.__class__.__name__})"))
         return
     if not a.is_fea_task:
         st.session_state.chat.append(("agent",
@@ -226,9 +242,14 @@ def _bubble(role: str, text: str):
 with st.container(border=True):
     hc1, hc2 = st.columns([3, 1])
     hc1.markdown('<div class="brand">AGENTIC&middot;FEA</div>', unsafe_allow_html=True)
-    hc2.markdown(f'<div class="muted" style="text-align:right;font-size:.72rem;margin-top:.15rem">'
-                 f'mode: {"DEMO · replay" if DEMO_MODE else "live · chat"}</div>', unsafe_allow_html=True)
     if DEMO_MODE:
+        hc2.markdown('<div class="muted" style="text-align:right;font-size:.72rem;margin-top:.15rem">'
+                     'mode: DEMO · replay</div>', unsafe_allow_html=True)
+    else:
+        hc2.radio("mode", ["live", "replay"], key="mode", horizontal=True, on_change=_switch_mode,
+                  label_visibility="collapsed",
+                  format_func={"live": "live · chat", "replay": "replay · recorded"}.get)
+    if REPLAY:
         examples = demo_examples()
         if not examples:
             st.error("no demo snapshots found — run: python record_demo.py")
@@ -281,7 +302,7 @@ with st.container(border=True):
 st.markdown('<hr class="rule">', unsafe_allow_html=True)
 
 # ---------------- live run: stream the pipeline once understanding is complete ----------------
-if not DEMO_MODE and st.session_state.phase == "ready" and st.session_state.run is None:
+if not REPLAY and st.session_state.phase == "ready" and st.session_state.run is None:
     import subprocess
     import sys
     defs = [("understand", "Understand"), ("parameterize", "Parameterize"),
@@ -295,41 +316,59 @@ if not DEMO_MODE and st.session_state.phase == "ready" and st.session_state.run 
                                      for sid, lbl in defs]), unsafe_allow_html=True)
 
     _draw()
-    # Every live run gets its own directory. Two sessions at once -- two
-    # browser tabs on the same dashboard -- would otherwise overwrite each
-    # other's mesh, results and run record without any error.
-    run_paths = RunPaths.new_run()
-    live_json = run_paths.live_run_json
-    proc = subprocess.Popen(
-        [sys.executable, str(HERE / "pipeline_run.py"), "--stream",
-         "--workdir", str(run_paths.root), "--out", str(live_json),
-         st.session_state.completed],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(HERE))
-    buf = []
-    for line in proc.stdout:
-        buf.append(line)
-        if line.startswith("@@ "):
-            parts = line.split()
-            if len(parts) >= 3 and parts[1] in status:
-                status[parts[1]] = parts[2]
-                cap.markdown(f'<div class="muted" style="font-size:.72rem">▶ {parts[1]} … {parts[2]}</div>',
-                             unsafe_allow_html=True)
-                _draw()
-    proc.wait()
+
+    def _refuse(message: str):
+        st.session_state.phase = "chatting"
+        st.session_state.chat.append(("agent", message))
+        st.rerun()
+
+    # Shared-use limits (run_guard; all off unless configured).
+    user = run_guard.user_of(st.context.headers)
+    run_guard.prune_old_runs()
+    if run_guard.runs_left(user) == 0:
+        _refuse("You have used today's live runs. The recorded examples still work: "
+                "switch to replay above.")
+    with st.spinner("waiting for a free run slot…"), run_guard.run_slot() as got:
+        if not got:
+            _refuse("Every run slot is busy right now; please send the problem again in a minute.")
+        run_guard.count_run(user)
+        # Every live run gets its own directory. Two sessions at once -- two
+        # browser tabs on the same dashboard -- would otherwise overwrite each
+        # other's mesh, results and run record without any error.
+        run_paths = RunPaths.new_run()
+        live_json = run_paths.live_run_json
+        proc = subprocess.Popen(
+            [sys.executable, str(HERE / "pipeline_run.py"), "--stream",
+             "--workdir", str(run_paths.root), "--out", str(live_json),
+             st.session_state.completed],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(HERE))
+        buf = []
+        for line in proc.stdout:
+            buf.append(line)
+            if line.startswith("@@ "):
+                parts = line.split()
+                if len(parts) >= 3 and parts[1] in status:
+                    status[parts[1]] = parts[2]
+                    cap.markdown(f'<div class="muted" style="font-size:.72rem">▶ {parts[1]} … {parts[2]}</div>',
+                                 unsafe_allow_html=True)
+                    _draw()
+        proc.wait()
     if live_json.exists() and proc.returncode == 0:
         st.session_state.run = json.loads(live_json.read_text())
         st.session_state.phase = "done"
         st.session_state.stage = 0
         st.rerun()
+    elif run_guard.budget_exhausted("".join(buf)):
+        _refuse(run_guard.BUDGET_MESSAGE)
     else:
         st.session_state.phase = "chatting"
         st.session_state.chat.append(("agent", "the pipeline failed — see the terminal; try adjusting the problem."))
         st.error("pipeline failed:\n\n" + "".join(buf[-25:]))
         st.stop()
 
-if not DEMO_MODE and st.session_state.phase == "chatting":
+if not REPLAY and st.session_state.phase == "chatting":
     st.stop()   # still clarifying — nothing below the divider yet
-if DEMO_MODE and st.session_state.demo_step < len(st.session_state.demo_chat):
+if REPLAY and st.session_state.demo_step < len(st.session_state.demo_chat):
     st.stop()   # still stepping through the recorded clarification — dashboard not yet
 
 run = st.session_state.run
