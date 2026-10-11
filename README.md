@@ -1,5 +1,7 @@
 # Agentic FEA Pipeline — LLM‑driven structural analysis
 
+[![CI](https://github.com/dontknowhow2namemzself/AgenticFEA/actions/workflows/ci.yml/badge.svg)](https://github.com/dontknowhow2namemzself/AgenticFEA/actions/workflows/ci.yml)
+
 Turn a plain‑English sentence into a **verified** finite‑element analysis — without ever letting the language model invent an engineering number.
 
 ![Agentic FEA dashboard — eight-stage walkthrough with the Pre-Process annotated mesh and acceptance checks](docs/dashboard.png)
@@ -184,6 +186,23 @@ From that sentence the language layer resolves `aluminium → ALUMINUM` (E, ν, 
 A dark "control‑room" UI. A clarification chat resolves the request (asks which geometry when that is not yet clear, asks for missing must‑haves, quotes back any value given twice with different numbers, guards scope), then a clickable eight‑stage bar walks the run: the **left** panel is the action flow, the **right** panel holds the artifacts — an annotated mesh (FIXED/LOAD read straight from the `.inp`), stress/displacement plots, the RAG‑selected reference, and the acceptance reports. Post‑processing leads with an **interactive 3D view**: the result field on the model with the real element edges drawn over it (a quadratic edge is drawn through its midside node, so the hole's edges are curved, not chorded), menus inside the figure for the field and the deformed shape, and the nodal value on hover. The fixed PNG views below it are drawn from the same data with the same edges, rainbow fringe and min–max range, so the bar of a field carries the same numbers in both. When the dashboard runs on your own machine and ParaView is installed, a live run also offers **open in ParaView**: it starts ParaView on the run's `.vtu` with the same field, colours, range and camera, and the deformed shape one click away — for slicing, probing and the solid's interior. Live runs are kept: a menu above the chat lists your earlier runs (when, what, verdict, and a ⚠ if a validity check was exceeded) with how many there are, and reopens any of them. Each run records who started it, when, and how long each stage took. At the Verify stage, **technical report (PDF)** gives a short document to hand over: the load case (geometry, material with its yield strength and source, supports, load, mesh, every assumption applied), the results, the verification against the reference, the validity checks, the time each stage took, and the field plots. Deterministic code writes it from the run record (`report.py`; the same record gives the same file), and no language model writes any of it. DEMO mode replays the snapshots in `demo/` — including the opening clarification dialogue — so it runs with no key and no solver:
 `cantilever_pass` (verified against beam theory), `plate_pass` (the exchange above), and `stubby_fail` (a beam too stubby for the theory, where the diagnostics agent correctly blames the theory rather than the solver).
 
+### Tests
+
+Every push to `main` and every pull request runs the tests on a clean machine (GitHub Actions, [`.github/workflows/ci.yml`](.github/workflows/ci.yml)), in the environment the dashboard is served from: the same CalculiX build, off‑screen rendering, no display. They call **no language model**, so they need no API key and cost nothing:
+
+- **Regression:** both prepared cases through the whole deterministic chain. Verdict and error against the reference (cantilever 0.0561 %, plate 0.293 %), the validity warnings, every stage and render, and a technical report that is the same file when built twice.
+- **Self‑tests** of the layers: parameter validation for both geometries, layer 1's gaps, defaults and contradictions, and the retrieval plumbing (offline).
+- **Shared‑use limits:** the trusted user header, the daily quota, run slots, the clean‑up of old runs, an exhausted LLM budget.
+- **Recorded examples:** no machine paths in the committed records, their parameters validate, every file they show exists, each gives a report.
+- **Dashboard,** driven headless with Streamlit's `AppTest`: every stage of every recorded example, and reopening an earlier live run while new ones appear.
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The language layers are measured separately, against a real model: `eval_understanding.py` (14 scripted conversations) runs by hand before a model change, since its results vary between runs and every run costs money.
+
 ---
 
 ## Validation & results
@@ -256,6 +275,8 @@ params.py                       # validated parameters — single source of trut
 schema.py                       # Pydantic validation (+ SI‑mm magnitude guards)
 task_understanding.py           # layer 1 — NL understanding / clarification
 eval_understanding.py           # layer 1 measured: scripted conversations vs a real model
+tests/                          # pytest: regression, self-tests, limits, demos, dashboard
+.github/workflows/ci.yml        # CI: the tests on every push and pull request
 parameterize.py                 # layer 2 — set_params tool (LLM) → validate → params.py
 knowledge/
   materials.py                  # SI‑mm materials library (name → E/ν/ρ)

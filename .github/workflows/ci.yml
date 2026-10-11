@@ -1,0 +1,63 @@
+# Every push to main and every pull request: build the environment on a clean
+# machine and run the tests (pytest, see tests/). No language model is called,
+# so no API key is needed and nothing is spent: the language layers are tested
+# by eval_understanding.py, run by hand before a model change.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:                       # a newer push to the same branch replaces the run
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash -el {0}        # a login shell, so the micromamba env is active
+    env:
+      # VTK picks its window at run time; with no display, render through OSMesa.
+      VTK_DEFAULT_OPENGL_WINDOW: vtkOSOpenGLRenderWindow
+    steps:
+      - uses: actions/checkout@v4
+
+      # gmsh's X client libraries (loaded even headless), OSMesa for off-screen
+      # VTK, and the monospace font with Greek glyphs the renders use.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libosmesa6 libgl1 libglu1-mesa libxrender1 libxcursor1 \
+            libxfixes3 libxft2 libxinerama1 libfontconfig1 fonts-dejavu-core
+
+      # CalculiX is a conda package, not a pip one: the build the results were
+      # verified with.
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: fea
+          condarc: |
+            channels:
+              - conda-forge
+          create-args: >-
+            python=3.12
+            calculix=2.23=pl5321h92dc11e_5
+          cache-environment: true
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
+
+      - name: Python packages
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Tests
+        run: pytest -v
