@@ -177,11 +177,17 @@ def past_runs(user: str, tz: str | None = None) -> list:
     return out
 
 
-def _open_past_run():
-    """Load the chosen earlier run as if it had just finished."""
+def _open_past_run(user: str):
+    """Load the chosen earlier run as if it had just finished.
+
+    Only a run in this user's own listing is opened: the widget's value is not
+    trusted to be a run name. (Streamlit matches a selection by its label, so a
+    label that changed between reruns once came back here as the value.)
+    """
     from paths import RUNS_ROOT
     name = st.session_state.past_run
-    if not name:
+    if name not in dict(past_runs(user)):
+        st.session_state.past_run = None
         return
     run = json.loads((RUNS_ROOT / name / "live_run.json").read_text())
     st.session_state.update(run=run, stage=0, phase="done", completed=None, thinking=False,
@@ -190,7 +196,7 @@ def _open_past_run():
 
 def _new_problem():
     st.session_state.update(run=None, chat=[], since=0, completed=None, phase="chatting",
-                            stage=0, past_run="")
+                            stage=0, past_run=None)
 
 
 def load_demo(name: str) -> dict:
@@ -226,7 +232,7 @@ def stage_bar_html(stage_list: list, sel=None) -> str:
 # ---------------- command console: a clarification chat (live) ----------------
 for _k, _v in {"run": None, "stage": 0, "chat": [], "since": 0,
                "phase": "chatting", "completed": None, "thinking": False,
-               "demo_chat": [], "demo_step": 0, "past_run": "",
+               "demo_chat": [], "demo_step": 0, "past_run": None,
                "mode": "replay" if DEMO_MODE else "live"}.items():
     st.session_state.setdefault(_k, _v)
 REPLAY = st.session_state.mode == "replay"
@@ -236,7 +242,7 @@ def _switch_mode():
     """Each mode starts clean: a fresh chat, or the first recorded example."""
     for k, v in {"run": None, "stage": 0, "chat": [], "since": 0, "phase": "chatting",
                  "completed": None, "thinking": False, "pick": None,
-                 "demo_chat": [], "demo_step": 0, "past_run": ""}.items():
+                 "demo_chat": [], "demo_step": 0, "past_run": None}.items():
         st.session_state[k] = v
 
 
@@ -306,12 +312,16 @@ with st.container(border=True):
                         unsafe_allow_html=True)
     else:
         # Earlier runs of this user: reopen one, and see how many are kept.
-        _past = past_runs(run_guard.user_of(st.context.headers), st.context.timezone)
+        # The options are the runs alone and the count is the placeholder: an
+        # option whose label changes (a count, after a new run) is no longer
+        # recognised by Streamlit, which then hands back the old label as a value.
+        _user = run_guard.user_of(st.context.headers)
+        _past = past_runs(_user, st.context.timezone)
         if _past:
             _labels = dict(_past)
-            st.selectbox("earlier runs", [""] + list(_labels), key="past_run",
-                         format_func=lambda n: _labels.get(n, f"earlier runs ({len(_past)}) …"),
-                         on_change=_open_past_run, label_visibility="collapsed")
+            st.selectbox("earlier runs", list(_labels), key="past_run", index=None,
+                         placeholder=f"earlier runs ({len(_past)}) …", format_func=lambda n: _labels.get(n, str(n)),
+                         on_change=_open_past_run, args=(_user,), label_visibility="collapsed")
         for _role, _text, *_ in st.session_state.chat:
             _bubble(_role, _text)
         if st.session_state.thinking:
