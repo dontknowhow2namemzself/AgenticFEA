@@ -30,6 +30,18 @@ IRON LAW: the formula comes from the knowledge base (an agent only SELECTS it);
 the error and threshold are computed by deterministic code here. Selection is
 RAG retrieval NARROWING candidates, then the deterministic applies() gate.
 
+VALIDITY of the linear-elastic model, checked beside the verdict. Agreement
+with the reference shows that the solver and the theory agree with each other;
+both assume a linear-elastic material and small deflections, so a load that
+breaks those assumptions can still "pass" -- a 1000 x 20 x 10 mm steel
+cantilever under 1500 N agreed to 0.06 % at 2250 MPa nominal stress and a tip
+deflection of 36 % of its length. Two deterministic checks say so:
+  * stress below the yield strength (knowledge.materials.YIELD, with its grade
+    and source; a material without one is reported as not checked);
+  * small deflection, delta / L <= SMALL_DEFLECTION (the beam).
+They do not change the verdict on the reference; they say whether the
+verified model is the right model.
+
 Unit system: SI-mm; stress concentration factors are dimensionless.
 """
 
@@ -41,10 +53,17 @@ import sys
 import numpy as np
 
 from boundary_conditions import build_bc
+from knowledge.materials import yield_strength
 from knowledge.reference_solutions import select_reference_case
 from params import PARAMS
 from paths import RunPaths, add_workdir_argument, from_args
 from physics_validation import _von_mises, parse_frd
+
+# Small-deflection limit for the beam, delta / L. Up to here the linear theory
+# that both the solver and the reference use differs from the exact large-
+# deflection solution (the elastica of a tip-loaded cantilever) by 1.0 %, the
+# tip turning 8.5 deg; at 0.20 the difference is 4 %, at 0.36 it is 12 %.
+SMALL_DEFLECTION = 0.10
 
 STRESS_EXIT_REASONS = (
     "fixed-end stress concentration diverges under mesh refinement (not the section value Mc/I)",
@@ -125,6 +144,49 @@ def _select_reference(params: dict, use_rag: bool = True) -> tuple:
     return select_reference_case(params), "deterministic scan (retrieval disabled for batch)"
 
 
+def _validity(params: dict, sigma: float, sigma_what: str, delta: float = None,
+              length: float = None) -> list:
+    """Is the linear-elastic, small-deflection model valid for this result?
+
+    Returns [{"name", "status" (OK | EXCEEDED | NOT CHECKED), "detail"}, ...].
+    """
+    checks = []
+    material = params["material"]["name"]
+    fy = yield_strength(material)
+    if fy is None:
+        checks.append({"name": "stress below yield", "status": "NOT CHECKED",
+                       "detail": f"no yield strength for {material} in the materials library"})
+    else:
+        fy_value, source = fy
+        ok = sigma <= fy_value
+        checks.append({"name": "stress below yield", "status": "OK" if ok else "EXCEEDED",
+                       "detail": (f"{sigma_what} = {sigma:.1f} MPa {'<=' if ok else '>'} "
+                                  f"fy = {fy_value:g} MPa ({sigma / fy_value:.2f} x fy); {source}")})
+    if delta is not None:
+        ratio = delta / length
+        ok = ratio <= SMALL_DEFLECTION
+        checks.append({"name": "small deflection", "status": "OK" if ok else "EXCEEDED",
+                       "detail": (f"delta/L = {delta:.4g}/{length:g} = {ratio:.3f} "
+                                  f"{'<=' if ok else '>'} {SMALL_DEFLECTION:g} (beyond it the linear "
+                                  f"theory of solver and reference no longer holds)")})
+    return checks
+
+
+def _validity_lines(checks: list) -> list:
+    lines = ["VALIDITY OF THE LINEAR-ELASTIC MODEL  (checked beside the verdict, not part of it):"]
+    for c in checks:
+        lines.append(f"  [{c['status']:<11}] {c['name']:<18} {c['detail']}")
+    return lines
+
+
+def _verdict_suffix(checks: list) -> str:
+    broken = [c["name"] for c in checks if c["status"] == "EXCEEDED"]
+    if not broken:
+        return ""
+    return (" -- BUT outside the linear-elastic model's validity (" + "; ".join(broken)
+            + "): the solver and the reference agree under assumptions this load breaks")
+
+
 def run_verification(params: dict, paths: RunPaths = None, use_rag: bool = True) -> tuple:
     """Run the geometry's verification. Returns (overall_ok, judged, recorded, meta)."""
     paths = paths or RunPaths.default()
@@ -188,7 +250,10 @@ def _verify_plate(params: dict, paths: RunPaths, use_rag: bool = True) -> tuple:
                 "max_vm_global": max(_von_mises(s) for s in frd["STRESS"].values())}
     meta = {"frd": str(paths.frd), "geom": "plate_with_hole",
             "model_line": (f"plate_with_hole a={a} b={b} t={t} mm, hole r={r} at "
-                           f"({xc}, {yc}) mm | 2D plane stress | F={F} N")}
+                           f"({xc}, {yc}) mm | 2D plane stress | F={F} N"),
+            # The hole peak converges (unlike the beam's clamped corner), so it is
+            # a fair stress to hold against the yield strength.
+            "validity": _validity(params, sigma_max, "peak von Mises on the hole")}
     overall_ok = judged["status"] != "FAIL"
     return overall_ok, judged, recorded, meta
 
@@ -223,8 +288,14 @@ def _verify_beam(params: dict, paths: RunPaths, use_rag: bool = True) -> tuple:
         }
 
     stress = {"max_vm": max_vm}
+    # Against yield: the nominal bending stress at the clamp, M c / I = 6 P L / (b h^2).
+    # The FE peak sits at the clamped corner, a singularity that grows with mesh
+    # refinement, so it would trip the check for any load on a fine enough mesh.
+    sigma_nominal = 6.0 * P * L / (b * h ** 2)
     meta = {"frd": str(paths.frd), "geom": "cantilever_beam", "L": L, "h": h, "b": b,
-            "model_line": f"cantilever_beam | static | linear elastic | L={L} h={h} b={b} mm"}
+            "model_line": f"cantilever_beam | static | linear elastic | L={L} h={h} b={b} mm",
+            "validity": _validity(params, sigma_nominal, "nominal bending stress at the clamp, "
+                                  "M c / I", delta=delta_fem, length=L)}
     overall_ok = disp["status"] != "FAIL"   # PASS or N/A -> chain ok; FAIL -> diagnostics
     return overall_ok, disp, stress, meta
 
@@ -281,13 +352,16 @@ def _format_plate_report(overall_ok: bool, judged: dict, recorded: dict, meta: d
     lines.append("  at 32 / 64 / 126 hole segments; the hole-edge peak converges to a finite")
     lines.append("  value (unlike the cantilever's fixed-end corner), which is what makes")
     lines.append("  the stress auto-judgeable here.")
+    lines.append("")
+    lines += _validity_lines(meta["validity"])
     lines.append("-" * 64)
+    suffix = _verdict_suffix(meta["validity"])
     if case is None:
-        lines.append("VERDICT: N/A  (no applicable reference; SCF not auto-judged)")
+        lines.append("VERDICT: N/A  (no applicable reference; SCF not auto-judged)" + suffix)
     elif judged["status"] == "PASS":
-        lines.append("VERDICT: PASS  (Kt within tolerance of the Howland/Peterson reference)")
+        lines.append("VERDICT: PASS  (Kt within tolerance of the Howland/Peterson reference)" + suffix)
     else:
-        lines.append("VERDICT: FAIL  (Kt outside tolerance) -> go to diagnostics (layer 8)")
+        lines.append("VERDICT: FAIL  (Kt outside tolerance) -> go to diagnostics (layer 8)" + suffix)
     lines.append("=" * 64)
     return "\n".join(lines) + "\n"
 
@@ -336,13 +410,16 @@ def _format_report(overall_ok: bool, disp: dict, stress: dict, meta: dict) -> st
     lines.append("  -> N/A. Judge stress visually from out/stress_x.png / stress_y.png / stress_z.png.")
     lines.append("")
     lines.append("mesh convergence study : not performed in the MVP (out of scope).")
+    lines.append("")
+    lines += _validity_lines(meta["validity"])
     lines.append("-" * 64)
+    suffix = _verdict_suffix(meta["validity"])
     if case is None:
-        lines.append("VERDICT: N/A  (no applicable reference; displacement not auto-judged)")
+        lines.append("VERDICT: N/A  (no applicable reference; displacement not auto-judged)" + suffix)
     elif disp["status"] == "PASS":
-        lines.append("VERDICT: PASS  (displacement within tolerance of the analytical solution)")
+        lines.append("VERDICT: PASS  (displacement within tolerance of the analytical solution)" + suffix)
     else:
-        lines.append("VERDICT: FAIL  (displacement outside tolerance) -> go to diagnostics (layer 8)")
+        lines.append("VERDICT: FAIL  (displacement outside tolerance) -> go to diagnostics (layer 8)" + suffix)
     lines.append("=" * 64)
     return "\n".join(lines) + "\n"
 

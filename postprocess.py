@@ -225,7 +225,7 @@ def report_and_check(s: dict) -> bool:
             print(f"           {name:<9}: [{lo:9.3f}, {hi:9.3f}] MPa")
     if s.get("warp_factor") is not None:
         print(f"warp     : x{s['warp_factor']:.3g} (peak |U| drawn at 5% of the model diagonal,"
-              f" as in the 3D view)")
+              f" never below x1, as in the 3D view)")
     print( "renders  :")
     for name, size in s["png_sizes"].items():
         print(f"           {name:<14}: {size / 1024:.1f} KB")
@@ -234,8 +234,9 @@ def report_and_check(s: dict) -> bool:
         print(f"     fallback: open {s['vtu_path']} in the ParaView GUI (human path).")
     v = s["viewer"]
     if v:
-        print(f"3D view  : {Path(v['path']).name}  ({v['kbytes']:.0f} KB; {v['n_triangles']} "
-              f"triangles, {v['n_edges']} element edges)")
+        print(f"3D view  : {Path(v['path']).name}  ({v['kbytes']:.0f} KB; {v['n_faces']} element "
+              f"faces, {v['n_edges']} element edges; a browser draws the faces as "
+              f"{v['n_triangles']} triangles)")
     else:
         print(f"  !! 3D view export error: {s['viewer_error']}")
 
@@ -272,7 +273,8 @@ def main() -> int:
         description="Postprocess frd -> vtu -> PNG (plan layer 6 / plate M8).")
     parser.add_argument("--warp", type=float, default=None,
                         help="displacement exaggeration factor "
-                             "(default: auto for the plate, x5 for the beam)")
+                             "(default: the 3D view's rule -- peak |U| drawn at 5%% of the model "
+                             "diagonal, never below 1)")
     add_workdir_argument(parser)
     args = parser.parse_args()
     summary = run_postprocess(warp_factor=args.warp, paths=from_args(args))

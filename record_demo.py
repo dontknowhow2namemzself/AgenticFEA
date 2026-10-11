@@ -131,8 +131,9 @@ def refresh_renders(name: str) -> None:
     postprocess, no LLM) is re-run on the snapshot's own validated parameters,
     and the result is accepted only if it reproduces the recorded maxima -- so
     the new renders are shown to be of the same solution. The Post-Process
-    stage is then rebuilt by the same function a live run uses, and its 3D
-    view data and PNGs replace the old ones.
+    and Verify stages are then rebuilt by the same functions a live run uses
+    (the verdict must reproduce too), and the 3D view data and PNGs replace
+    the old ones.
     """
     dst = DEMO / name
     rec = json.loads((dst / "run.json").read_text())
@@ -154,11 +155,20 @@ def refresh_renders(name: str) -> None:
             raise SystemExit(f"{name}: rendering failed ({post['render_error']}); snapshot left unchanged")
         is_plate = params["geometry"]["type"] == "plate_with_hole"
         stage = pipeline_run.postprocess_stage(post, is_plate, paths)
+        verify, verdict, warnings = pipeline_run.verify_stage(params, is_plate, paths)
+        if verdict != rec["verdict"]:
+            raise SystemExit(f"{name}: verdict {verdict} does not reproduce the recorded "
+                             f"{rec['verdict']}; snapshot left unchanged")
         files = _artifact_names({"stages": [stage]})
         for f in files:
             shutil.copy(paths.root / f, dst / f)
+        # The new reports name the throwaway run directory; a recorded run
+        # wrote to out/, so say that.
+        verify = json.loads(json.dumps(verify).replace(str(paths.root), "out"))
     stage["report"] = rec["stages"][k].get("report", "")
     rec["stages"][k] = stage
+    rec["stages"][next(i for i, s in enumerate(rec["stages"]) if s["id"] == "verify")] = verify
+    rec["warnings"] = warnings
     _rewrite_paths(rec, name)
     (dst / "run.json").write_text(json.dumps(_scrub(rec), indent=2, default=str))
     print(f"refreshed {name:<16} {len(files)} files · max |U| and max vM reproduce the record")

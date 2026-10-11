@@ -143,7 +143,7 @@ PLOTLY_CONFIG = {"displaylogo": False, "modeBarButtonsToRemove": ["resetCameraDe
                  "toImageButtonOptions": {"format": "png", "filename": "agentic_fea_view",
                                           "scale": 2}}
 EDGE_SAMPLES = 7       # points per quadratic edge; a parabola needs few
-EDGE_LIFT = 0.002      # edges sit this fraction of the model diagonal off the surface
+EDGE_LIFT = 0.1        # edges sit this fraction of an element edge off the surface
 CURVED_EDGE = 0.005    # midside node off the chord by > 0.5% of the edge: draw it curved
 WARP_FRACTION = 0.05   # deformed view: peak |U| drawn at 5% of the model diagonal
 
@@ -218,9 +218,10 @@ def _orient(pts, c, m, cen, dim):
 def build_payload(mesh) -> dict:
     """The viewer's data from a solved mesh (a pyvista UnstructuredGrid of the .vtu)."""
     pts = np.asarray(mesh.points, dtype=float)
-    tris, edges, dims = [], [], set()
+    tris, edges, dims, n_faces = [], [], set(), 0
     for c, m, cen, dim in _faces(mesh):
         dims.add(dim)
+        n_faces += len(c)
         c, m = _orient(pts, c, m, cen, dim)
         k = c.shape[1]
         slots = np.concatenate([c, m], axis=1) if m is not None else c
@@ -250,6 +251,7 @@ def build_payload(mesh) -> dict:
         "tri": renum[tri].astype(np.int32),
         "edges": edge.astype(np.int32),
         "dim": np.int32(max(dims)),
+        "n_faces": np.int32(n_faces),      # element faces on the surface (2D: the elements)
     }
 
 
@@ -257,8 +259,9 @@ def save_payload(mesh, npz_path: Path) -> dict:
     """Build and write <run>/viewer.npz; returns a summary for the stage record."""
     p = build_payload(mesh)
     np.savez_compressed(npz_path, **p)
-    return {"path": str(npz_path), "n_nodes": int(len(p["xyz"])), "n_triangles": int(len(p["tri"])),
-            "n_edges": int(len(p["edges"])), "kbytes": Path(npz_path).stat().st_size / 1024}
+    return {"path": str(npz_path), "n_nodes": int(len(p["xyz"])), "n_faces": int(p["n_faces"]),
+            "n_triangles": int(len(p["tri"])), "n_edges": int(len(p["edges"])),
+            "kbytes": Path(npz_path).stat().st_size / 1024}
 
 
 # ============================================================================
@@ -288,15 +291,19 @@ def field_values(payload: dict, key: str) -> np.ndarray:
 
 
 def auto_warp_factor(payload: dict) -> float:
-    """Exaggeration that draws the peak displacement at 5% of the model diagonal.
+    """Exaggeration that draws the peak displacement at 5% of the model diagonal,
+    but never below 1.
 
-    The same rule as postprocess._auto_warp_factor: a fixed factor cannot serve
-    a 0.01 mm plate deflection and a 2 mm cantilever tip at once.
+    A fixed factor cannot serve a 0.01 mm plate stretch and a 2 mm cantilever
+    tip at once, so the factor follows the result: the 100 x 10 x 10 demo beam
+    (diagonal 101 mm, peak 1.91 mm) gets 0.05 x 101 / 1.91 = x2.64. A
+    deformation already larger than that is drawn at true scale (x1) rather
+    than shrunk -- shrinking it would hide exactly what is worth seeing.
     """
     xyz = payload["xyz"].astype(float)
     diag = float(np.linalg.norm(xyz.max(axis=0) - xyz.min(axis=0)))
     peak = float(np.linalg.norm(payload["U"].astype(float), axis=1).max())
-    return WARP_FRACTION * diag / peak if peak > 0 and diag > 0 else 1.0
+    return max(1.0, WARP_FRACTION * diag / peak) if peak > 0 and diag > 0 else 1.0
 
 
 def _b64(a) -> dict:
@@ -310,7 +317,7 @@ def _b64(a) -> dict:
     return {"dtype": "f4", "bdata": base64.b64encode(a.tobytes()).decode("ascii")}
 
 
-def _edge_polylines(configs: list, edges: np.ndarray) -> list:
+def _edge_polylines(configs: list, edges: np.ndarray, tri: np.ndarray) -> list:
     """Element edges as polylines, one array per configuration, NaN rows between edges.
 
     A quadratic edge whose midside node sits off its chord (around the hole) is
@@ -318,7 +325,16 @@ def _edge_polylines(configs: list, edges: np.ndarray) -> list:
     shape functions on that edge -- so it is drawn curved, not as two chords. A
     straight one is a single segment: the same picture with a fraction of the
     points. An edge curved in ANY of the configurations is sampled in all of
-    them, so they share one layout.
+    them, so they share one layout. Curvature is judged on the true geometry.
+
+    Every edge is then lifted a hair off the surface (EDGE_LIFT of an element
+    edge), because a line lying exactly in it flickers in and out of it -- the
+    depth test cannot tell which is in front. The lift is ONE vector per edge,
+    a rigid shift. Moving each node along its own normal instead bends an edge
+    wherever the normals differ -- at the part's own edges and corners, where
+    they turn -- and draws curves that are not in the mesh; scaling the lift
+    with the whole model instead of the elements made that a 2 mm bend on a
+    1000 mm beam's 10 mm section.
     """
     quad = np.flatnonzero(edges[:, 1] >= 0)
     curved = np.zeros(len(edges), dtype=bool)
@@ -326,18 +342,23 @@ def _edge_polylines(configs: list, edges: np.ndarray) -> list:
         a, m, b = p[edges[quad, 0]], p[edges[quad, 1]], p[edges[quad, 2]]
         sag = np.linalg.norm(m - 0.5 * (a + b), axis=1)
         curved[quad] |= sag > CURVED_EDGE * np.linalg.norm(b - a, axis=1)
+    ref = configs[0]
+    lift = EDGE_LIFT * float(np.median(np.linalg.norm(ref[edges[:, 2]] - ref[edges[:, 0]], axis=1)))
     s = np.linspace(-1.0, 1.0, EDGE_SAMPLES)[None, :, None]
     out = []
     for p in configs:
+        n = _vertex_normals(p, tri)
+        shift = n[edges[:, 0]] + n[edges[:, 2]] + np.where(edges[:, 1:2] >= 0, n[np.maximum(edges[:, 1], 0)], 0.0)
+        shift *= lift / np.maximum(np.linalg.norm(shift, axis=1, keepdims=True), 1e-12)
         parts = []
-        e = edges[curved]
-        if len(e):
+        if curved.any():
+            e, d = edges[curved], shift[curved][:, None]
             a, m, b = p[e[:, 0]][:, None], p[e[:, 1]][:, None], p[e[:, 2]][:, None]
-            curve = 0.5 * s * (s - 1) * a + (1 - s ** 2) * m + 0.5 * s * (s + 1) * b
+            curve = 0.5 * s * (s - 1) * a + (1 - s ** 2) * m + 0.5 * s * (s + 1) * b + d
             parts.append(np.concatenate([curve, np.full((len(e), 1, 3), np.nan)], axis=1).reshape(-1, 3))
-        e = edges[~curved]
-        if len(e):
-            seg = np.stack([p[e[:, 0]], p[e[:, 2]], np.full((len(e), 3), np.nan)], axis=1)
+        if (~curved).any():
+            e, d = edges[~curved], shift[~curved]
+            seg = np.stack([p[e[:, 0]] + d, p[e[:, 2]] + d, np.full((len(e), 3), np.nan)], axis=1)
             parts.append(seg.reshape(-1, 3))
         out.append(np.concatenate(parts))
     return out
@@ -353,10 +374,13 @@ def _vertex_normals(pts: np.ndarray, tri: np.ndarray) -> np.ndarray:
     return vn / np.where(length > 0, length, 1.0)
 
 
-def _axis(title: str) -> dict:
-    return dict(title=dict(text=title, font=dict(color=MUTED, size=11)), color=MUTED,
+def _axis(title: str, span=None) -> dict:
+    axis = dict(title=dict(text=title, font=dict(color=MUTED, size=11)), color=MUTED,
                 gridcolor=GRID, zeroline=False, showbackground=False, showspikes=False,
                 tickfont=dict(size=10))
+    if span is not None:
+        axis.update(range=[float(span[0]), float(span[1])], autorange=False)
+    return axis
 
 
 def fringe(val: np.ndarray) -> dict:
@@ -450,11 +474,7 @@ def figure(payload: dict, height: int = 540):
         label, unit, _ = FIELDS[key]
         return f"{where} mm<br>{label} %{{intensity:.4g}} {unit}<extra></extra>"
 
-    # Edges drawn exactly in the surface flicker in and out of it (the depth
-    # test cannot tell which is in front), so they are lifted a hair outward.
-    diag = float(np.linalg.norm(xyz.max(axis=0) - xyz.min(axis=0)))
-    lines = _edge_polylines([p + EDGE_LIFT * diag * _vertex_normals(p, tri) for p in shapes.values()],
-                            payload["edges"])
+    lines = _edge_polylines(list(shapes.values()), payload["edges"], tri)
 
     # Sent as float32 / the smallest index type, like the menus: the figure
     # travels to the browser on every dashboard rerun.
@@ -516,8 +536,15 @@ def figure(payload: dict, height: int = 540):
     # True proportions, scaled so the longest side is 1. Plotly's own "data"
     # mode scales to a unit VOLUME instead, which stretches a 10:1 beam to 4.6
     # units and puts any fixed camera inside it.
-    extent = np.maximum(xyz.max(axis=0) - xyz.min(axis=0), 1e-12)
-    ratio = extent / extent.max()
+    # The axis ranges are fixed too, to a box holding BOTH shapes. Left to
+    # Plotly, a range follows the data shown while the box keeps the
+    # proportions set here: in the deformed shape the cantilever's tip goes
+    # 5 mm down, z spanned 15 mm in a box sized for 10, and the 10 x 10
+    # section was drawn 10 x 6.7.
+    both = np.vstack(list(shapes.values()))
+    pad = 0.03 * float((both.max(axis=0) - both.min(axis=0)).max())
+    lo, hi = both.min(axis=0) - pad, both.max(axis=0) + pad
+    ratio = (hi - lo) / (hi - lo).max()
     direction, up, parallel = VIEWS[opening]
     camera = dict(up=dict(zip("xyz", up)),
                   projection=dict(type="orthographic" if parallel else "perspective"))
@@ -528,12 +555,12 @@ def figure(payload: dict, height: int = 540):
         ratio = ratio * 1.4
         ratio[2] = 0.07                                  # a flat part has no depth
         camera["eye"] = dict(x=0.0, y=0.0, z=1.6)
-        zaxis = dict(_axis(""), visible=False)
+        zaxis = dict(_axis("", (lo[2], hi[2])), visible=False)
     else:
         # Looking along the length: the long axis recedes into depth, so the
         # part stays in frame however narrow the panel is.
         camera["eye"] = dict(zip("xyz", direction))
-        zaxis = _axis("z [mm]")
+        zaxis = _axis("z [mm]", (lo[2], hi[2]))
 
     fig = go.Figure([surface, wire, ext])
     fig.update_layout(
@@ -541,7 +568,7 @@ def figure(payload: dict, height: int = 540):
         paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font=dict(family='ui-monospace, "SF Mono", Menlo, monospace', color=TEXT),
         updatemenus=updatemenus,
-        scene=dict(xaxis=_axis("x [mm]"), yaxis=_axis("y [mm]"), zaxis=zaxis,
+        scene=dict(xaxis=_axis("x [mm]", (lo[0], hi[0])), yaxis=_axis("y [mm]", (lo[1], hi[1])), zaxis=zaxis,
                    domain=dict(x=[0, 1], y=[0.16, 1]),          # the bar lives below
                    aspectmode="manual", aspectratio=dict(x=ratio[0], y=ratio[1], z=ratio[2]),
                    bgcolor=PANEL, camera=camera,
@@ -628,8 +655,7 @@ def render_png(payload: dict, key: str, png_path, view: str = "iso", warp: float
 
     surf = pv.PolyData(pts, np.hstack([np.full((len(tri), 1), 3), tri]).ravel())
     surf.point_data["value"] = val
-    diag = float(np.linalg.norm(pts.max(axis=0) - pts.min(axis=0)))
-    line = _edge_polylines([pts + EDGE_LIFT * diag * _vertex_normals(pts, tri)], payload["edges"])[0]
+    line = _edge_polylines([pts], payload["edges"], tri)[0]
     lp, lc = _polyline_cells(line)
     wire = pv.PolyData(lp, lines=lc)
 

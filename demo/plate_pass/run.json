@@ -262,12 +262,12 @@
         },
         {
           "text": "Exported interactive 3D view",
-          "data": "7878 triangles \u00b7 2716 element edges",
+          "data": "1313 element faces \u00b7 2716 element edges",
           "status": "pass"
         },
         {
           "text": "Rendered \u03c3xx / \u03c3yy / \u03c3xy / vM (top view) + deformed",
-          "data": "same fringe, range and edges as the 3D view \u00b7 warp \u00d791.4 auto",
+          "data": "same fringe, range and edges as the 3D view \u00b7 deformed \u00d791.4: peak |U| drawn at 5% of the model size, never below \u00d71",
           "status": "pass"
         },
         {
@@ -333,6 +333,11 @@
           "text": "Judged Kt (stress concentration factor): PASS",
           "data": "threshold \u2264 3.0%",
           "status": "pass"
+        },
+        {
+          "text": "Checked the linear-elastic model's validity",
+          "data": "stress below yield: not checked",
+          "status": "pass"
         }
       ],
       "data": {
@@ -367,9 +372,21 @@
             "kb_ref": "plate_central_hole_tension_scf",
             "provenance": "RAG retrieval (k=3) then applies() gate -> 'plate_central_hole_tension_scf' at rank 1 (score 0.874)"
           }
+        },
+        {
+          "kind": "checks",
+          "title": "validity of the linear-elastic model",
+          "items": [
+            {
+              "name": "stress below yield",
+              "critical": false,
+              "message": "no yield strength for ALUMINUM in the materials library",
+              "status": "N/A"
+            }
+          ]
         }
       ],
-      "report": "Numerical Verification Report (plan layer 7 / plate plan M7)\n================================================================\nproblem : plate_with_hole a=240.0 b=120.0 t=1.0 mm, hole r=18.0 at (120.0, 60.0) mm | 2D plane stress | F=4500.0 N\nfrd     : out/beam.frd\n\nreference selection (RAG retrieval -> deterministic applies() gate):\n  RAG retrieval (k=3) then applies() gate -> 'plate_central_hole_tension_scf' at rank 1 (score 0.874)\n  MATCHED -> finite-width plate with a central circular hole, uniaxial tension  [id: plate_central_hole_tension_scf]\n    applies_to : plate_with_hole; hole centered in a strip under uniaxial tension; 2r/b <= 0.6; hole >= 0.7*b clear of the loaded ends; linear elastic plane stress\n    scope_note : net-section SCF: sigma_max = Ktn * sigma_net with sigma_net = F/((b-2r)*t); central hole only, 2r/b <= 0.6; Howland's strip is infinitely long, so end effects must have decayed at the hole; small strain, linear elastic plane stress\n    source     : Peterson's Stress Concentration Factors, 3rd ed. (Pilkey & Pilkey, Wiley 2008), Ch. 4 'Holes', Chart 4.1: Ktn = 3.00 - 3.14*lam + 3.667*lam^2 - 1.527*lam^3, lam = 2r/b -- a fit to Howland (1930), Phil. Trans. R. Soc. A 229, 49-86; lam -> 0 recovers the Kirsch (1898) infinite-plate value Kt = 3\n\nSTRESS CONCENTRATION  (auto-judged):\n  peak    = 126.4142 MPa (max von Mises over 56 hole-boundary nodes)\n            at node 12, theta = +90.0 deg (Kirsch/Howland peak at +-90 deg)\n  scales  = sigma_net 53.5714 MPa (= F/((b-2r)*t)) ; sigma_gross 37.5000 MPa (= F/(b*t)) ; 2r/b = 0.300\n  Kt_fem  = 2.3597   (peak / sigma_net)\n  Kt_ref  = 2.3468   (Howland/Peterson fit at 2r/b = 0.300)\n  rel error = 0.5510 %    tolerance = 3.0000 %\n  -> PASS\n\nDISPLACEMENT  (NOT auto-judged -- recorded for human review):\n  mean elongation of the loaded edge = 0.145852 mm\n  A perforated plate's elongation has no closed-form reference, so no\n  verdict is issued on it. (The reverse of the cantilever, where\n  displacement is judged and stress is not -- each geometry is judged\n  on the quantity its physics actually makes judgeable.)\n  max von Mises over the whole model = 126.4142 MPa\n\nmesh convergence: measured during M6 -- Kt_fem = 2.2395 / 2.2441 / 2.2471\n  at 32 / 64 / 126 hole segments; the hole-edge peak converges to a finite\n  value (unlike the cantilever's fixed-end corner), which is what makes\n  the stress auto-judgeable here.\n----------------------------------------------------------------\nVERDICT: PASS  (Kt within tolerance of the Howland/Peterson reference)\n================================================================\n"
+      "report": "Numerical Verification Report (plan layer 7 / plate plan M7)\n================================================================\nproblem : plate_with_hole a=240.0 b=120.0 t=1.0 mm, hole r=18.0 at (120.0, 60.0) mm | 2D plane stress | F=4500.0 N\nfrd     : out/beam.frd\n\nreference selection (RAG retrieval -> deterministic applies() gate):\n  RAG retrieval (k=3) then applies() gate -> 'plate_central_hole_tension_scf' at rank 1 (score 0.874)\n  MATCHED -> finite-width plate with a central circular hole, uniaxial tension  [id: plate_central_hole_tension_scf]\n    applies_to : plate_with_hole; hole centered in a strip under uniaxial tension; 2r/b <= 0.6; hole >= 0.7*b clear of the loaded ends; linear elastic plane stress\n    scope_note : net-section SCF: sigma_max = Ktn * sigma_net with sigma_net = F/((b-2r)*t); central hole only, 2r/b <= 0.6; Howland's strip is infinitely long, so end effects must have decayed at the hole; small strain, linear elastic plane stress\n    source     : Peterson's Stress Concentration Factors, 3rd ed. (Pilkey & Pilkey, Wiley 2008), Ch. 4 'Holes', Chart 4.1: Ktn = 3.00 - 3.14*lam + 3.667*lam^2 - 1.527*lam^3, lam = 2r/b -- a fit to Howland (1930), Phil. Trans. R. Soc. A 229, 49-86; lam -> 0 recovers the Kirsch (1898) infinite-plate value Kt = 3\n\nSTRESS CONCENTRATION  (auto-judged):\n  peak    = 126.4142 MPa (max von Mises over 56 hole-boundary nodes)\n            at node 12, theta = +90.0 deg (Kirsch/Howland peak at +-90 deg)\n  scales  = sigma_net 53.5714 MPa (= F/((b-2r)*t)) ; sigma_gross 37.5000 MPa (= F/(b*t)) ; 2r/b = 0.300\n  Kt_fem  = 2.3597   (peak / sigma_net)\n  Kt_ref  = 2.3468   (Howland/Peterson fit at 2r/b = 0.300)\n  rel error = 0.5510 %    tolerance = 3.0000 %\n  -> PASS\n\nDISPLACEMENT  (NOT auto-judged -- recorded for human review):\n  mean elongation of the loaded edge = 0.145852 mm\n  A perforated plate's elongation has no closed-form reference, so no\n  verdict is issued on it. (The reverse of the cantilever, where\n  displacement is judged and stress is not -- each geometry is judged\n  on the quantity its physics actually makes judgeable.)\n  max von Mises over the whole model = 126.4142 MPa\n\nmesh convergence: measured during M6 -- Kt_fem = 2.2395 / 2.2441 / 2.2471\n  at 32 / 64 / 126 hole segments; the hole-edge peak converges to a finite\n  value (unlike the cantilever's fixed-end corner), which is what makes\n  the stress auto-judgeable here.\n\nVALIDITY OF THE LINEAR-ELASTIC MODEL  (checked beside the verdict, not part of it):\n  [NOT CHECKED] stress below yield no yield strength for ALUMINUM in the materials library\n----------------------------------------------------------------\nVERDICT: PASS  (Kt within tolerance of the Howland/Peterson reference)\n================================================================\n"
     }
   ],
   "diagnosis": null,
@@ -380,5 +397,6 @@
     "n_elem": 1313,
     "n_nodes": 4119
   },
-  "workdir": "demo/plate_pass"
+  "workdir": "demo/plate_pass",
+  "warnings": []
 }
