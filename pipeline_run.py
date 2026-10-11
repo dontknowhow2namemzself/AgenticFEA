@@ -116,7 +116,8 @@ def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
         render_text, detail = "Rendered von Mises end / side / top + deformed side", "3 views"
     render_action = {"text": render_text,
                      "data": post["render_error"] or (f"same fringe, range and edges as the 3D view"
-                                                      f" · warp ×{post['warp_factor']:.3g} auto"),
+                                                      f" · deformed ×{post['warp_factor']:.3g}: peak |U| drawn at 5% of"
+                                                      f" the model size, never below ×1"),
                      "status": "fail" if post["render_error"] else "pass"}
     # The interactive 3D view leads the panel; the PNGs stay below it as the
     # fixed views worth keeping. A failed export only drops the 3D view.
@@ -136,6 +137,67 @@ def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
                  {"text": "Lossless check vs frd", "data": "max values match", "status": "pass"}],
         data={"max_disp": post["max_disp"], "max_vm": post["max_vm"], "fields": post["fields"]},
         artifacts=view_artifact + [{"kind": "views", "title": "field renders", "views": views}])
+
+
+def verify_stage(params: dict, is_plate: bool, paths: RunPaths) -> tuple:
+    """(the Verify stage record, the verdict, validity warnings), and the report file.
+
+    One place builds it, shared with record_demo --refresh-renders. The
+    verdict judges agreement with the reference; the validity checks
+    (verification._validity) say whether the linear-elastic model fits the
+    result at all, and turn the stage amber -- not red -- when it does not.
+    """
+    vok, judged, recorded, meta = verification.run_verification(params, paths=paths)
+    verify_text = verification._format_report(vok, judged, recorded, meta)
+    paths.verification_report.write_text(verify_text)   # fresh report for diagnosis + expander
+    verdict = judged["status"]
+    kb = judged["case"].id if judged.get("case") else None
+    if is_plate:
+        vdata = {"quantity": "Kt (stress concentration factor)",
+                 "fem": judged.get("kt_fem"), "ref": judged.get("kt_ref"),
+                 "max_vm": recorded["max_vm_global"],
+                 "elongation": recorded["mean_elongation"]}
+        judge_title = "stress-concentration verdict"
+        default_tol = 0.03
+    else:
+        vdata = {"quantity": "tip deflection [mm]",
+                 "fem": judged.get("delta_fem"), "ref": judged.get("delta_ref"),
+                 "max_vm": recorded["max_vm"]}
+        judge_title = "displacement verdict"
+        default_tol = 0.05
+    # delta_fem / delta_ref stay in the record: the dashboard's judge widget and
+    # the recorded demo snapshots read those keys.
+    vdata.update({
+        "delta_fem": judged.get("delta_fem"), "delta_ref": judged.get("delta_ref"),
+        "error_pct": round(judged["error"] * 100, 4) if judged.get("error") is not None else None,
+        "tol_pct": round(judged.get("tol", default_tol) * 100, 2), "verdict": verdict,
+        "kb_ref": kb, "provenance": judged.get("provenance")})
+    validity = meta["validity"]
+    exceeded = [c for c in validity if c["status"] == "EXCEEDED"]
+    warnings = [f'{c["name"]}: {c["detail"].split(";")[0]}' for c in exceeded]
+    record = dict(id="verify", label="Verify",
+          status="fail" if verdict == "FAIL" else "warning" if exceeded else "pass",
+          detail=(f'{vdata["error_pct"]}%' if vdata["error_pct"] is not None else verdict)
+                 + (" ⚠" if exceeded else ""),
+          actions=[{"text": "RAG retrieved reference candidates", "data": "ChromaDB · kind=reference", "status": "pass"},
+                   {"text": f"applies() gate → {kb or 'no applicable reference'}",
+                    "data": "deterministic match" if kb else "verdict N/A, nothing fabricated",
+                    "status": "pass"},
+                   {"text": "Computed error (deterministic code)", "data": "the LLM never invents the formula", "status": "pass"},
+                   {"text": f"Judged {vdata['quantity']}: {verdict}",
+                    "data": f'threshold ≤ {vdata["tol_pct"]}%',
+                    "status": verdict.lower() if verdict != "N/A" else "pass"},
+                   {"text": "Checked the linear-elastic model's validity",
+                    "data": " · ".join(f'{c["name"]}: {c["status"].lower()}' for c in validity),
+                    "status": "warning" if exceeded else "pass"}],
+          data=vdata,
+          artifacts=[{"kind": "judge", "title": judge_title, "verify": vdata},
+                     {"kind": "checks", "title": "validity of the linear-elastic model",
+                      "items": [{"name": c["name"], "critical": False, "message": c["detail"],
+                                 "status": {"OK": "PASS", "EXCEEDED": "WARNING"}.get(c["status"], "N/A")}
+                                for c in validity]}],
+          report=verify_text)
+    return record, verdict, warnings
 
 
 def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit=None,
@@ -329,44 +391,9 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
     # 7 -- numerical verification. Which quantity is judged depends on the
     # geometry (plate plan D3): the beam judges displacement, the plate judges
     # the stress concentration factor.
-    vok, judged, recorded, meta = verification.run_verification(params, paths=paths)
-    verify_text = verification._format_report(vok, judged, recorded, meta)
-    paths.verification_report.write_text(verify_text)   # fresh report for diagnosis + expander
-    verdict = judged["status"]; rec["verdict"] = verdict
-    kb = judged["case"].id if judged.get("case") else None
-    if is_plate:
-        vdata = {"quantity": "Kt (stress concentration factor)",
-                 "fem": judged.get("kt_fem"), "ref": judged.get("kt_ref"),
-                 "max_vm": recorded["max_vm_global"],
-                 "elongation": recorded["mean_elongation"]}
-        judge_title = "stress-concentration verdict"
-        default_tol = 0.03
-    else:
-        vdata = {"quantity": "tip deflection [mm]",
-                 "fem": judged.get("delta_fem"), "ref": judged.get("delta_ref"),
-                 "max_vm": recorded["max_vm"]}
-        judge_title = "displacement verdict"
-        default_tol = 0.05
-    # delta_fem / delta_ref stay in the record: the dashboard's judge widget and
-    # the recorded demo snapshots read those keys.
-    vdata.update({
-        "delta_fem": judged.get("delta_fem"), "delta_ref": judged.get("delta_ref"),
-        "error_pct": round(judged["error"] * 100, 4) if judged.get("error") is not None else None,
-        "tol_pct": round(judged.get("tol", default_tol) * 100, 2), "verdict": verdict,
-        "kb_ref": kb, "provenance": judged.get("provenance")})
-    stage(id="verify", label="Verify", status="pass" if verdict in ("PASS", "N/A") else "fail",
-          detail=f'{vdata["error_pct"]}%' if vdata["error_pct"] is not None else verdict,
-          actions=[{"text": "RAG retrieved reference candidates", "data": "ChromaDB · kind=reference", "status": "pass"},
-                   {"text": f"applies() gate → {kb or 'no applicable reference'}",
-                    "data": "deterministic match" if kb else "verdict N/A, nothing fabricated",
-                    "status": "pass"},
-                   {"text": "Computed error (deterministic code)", "data": "the LLM never invents the formula", "status": "pass"},
-                   {"text": f"Judged {vdata['quantity']}: {verdict}",
-                    "data": f'threshold ≤ {vdata["tol_pct"]}%',
-                    "status": verdict.lower() if verdict != "N/A" else "pass"}],
-          data=vdata,
-          artifacts=[{"kind": "judge", "title": judge_title, "verify": vdata}],
-          report=verify_text)
+    verify, verdict, warnings = verify_stage(params, is_plate, paths)
+    rec["verdict"], rec["warnings"] = verdict, warnings
+    stage(**verify)
     if verdict == "FAIL":
         rec["status"] = "failed"
         rec["diagnosis"] = _diagnose("verification", params, paths)

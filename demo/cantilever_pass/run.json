@@ -262,7 +262,7 @@
         },
         {
           "text": "Rendered von Mises end / side / top + deformed side",
-          "data": "same fringe, range and edges as the 3D view \u00b7 warp \u00d72.64 auto",
+          "data": "same fringe, range and edges as the 3D view \u00b7 deformed \u00d72.64: peak |U| drawn at 5% of the model size, never below \u00d71",
           "status": "pass"
         },
         {
@@ -305,8 +305,8 @@
     {
       "id": "verify",
       "label": "Verify",
-      "status": "pass",
-      "detail": "0.0561%",
+      "status": "warning",
+      "detail": "0.0561% \u26a0",
       "actions": [
         {
           "text": "RAG retrieved reference candidates",
@@ -327,6 +327,11 @@
           "text": "Judged tip deflection [mm]: PASS",
           "data": "threshold \u2264 5.0%",
           "status": "pass"
+        },
+        {
+          "text": "Checked the linear-elastic model's validity",
+          "data": "stress below yield: exceeded \u00b7 small deflection: ok",
+          "status": "warning"
         }
       ],
       "data": {
@@ -359,9 +364,27 @@
             "kb_ref": "cantilever_tip_load_eb",
             "provenance": "RAG retrieval (k=3) then applies() gate -> 'cantilever_tip_load_eb' at rank 1 (score 0.891)"
           }
+        },
+        {
+          "kind": "checks",
+          "title": "validity of the linear-elastic model",
+          "items": [
+            {
+              "name": "stress below yield",
+              "critical": false,
+              "message": "nominal bending stress at the clamp, M c / I = 600.0 MPa > fy = 355 MPa (1.69 x fy); STEEL taken as structural steel S355: fy = 355 MPa for t <= 40 mm (EN 1993-1-1:2005, Table 3.1)",
+              "status": "WARNING"
+            },
+            {
+              "name": "small deflection",
+              "critical": false,
+              "message": "delta/L = 1.906/100 = 0.019 <= 0.1 (beyond it the linear theory of solver and reference no longer holds)",
+              "status": "PASS"
+            }
+          ]
         }
       ],
-      "report": "Numerical Verification Report (plan layer 7)\n================================================================\nproblem : cantilever_beam | static | linear elastic | L=100.0 h=10.0 b=10.0 mm\nfrd     : out/beam.frd\n\nreference selection (RAG retrieval -> deterministic applies() gate):\n  RAG retrieval (k=3) then applies() gate -> 'cantilever_tip_load_eb' at rank 1 (score 0.891)\n  MATCHED -> standard cantilever, free-end transverse point load  [id: cantilever_tip_load_eb]\n    applies_to : cantilever_beam; one end fully fixed; free-end transverse point load; linear elastic; small strain\n    scope_note : small strain, linear elastic, slender beam L/h >> 1 (Euler-Bernoulli; transverse shear deformation neglected)\n    source     : Euler-Bernoulli beam theory: delta = P L^3 / (3 E I), I = b h^3 / 12\n    note       : this configuration has L/h = 10.0\n\nDISPLACEMENT  (auto-judged):\n  delta_fem = 1.90583 mm   (max |U . load_dir| over the free-end LOAD face)\n  delta_ref = 1.90476 mm   (P L^3 / 3EI; P=1000 N, L=100 mm, E=210000 MPa, I=833.33 mm^4)\n  rel error = 0.0561 %    tolerance = 5.0000 %\n  -> PASS\n\nSTRESS  (NOT auto-judged -- recorded for human review):\n  max von Mises = 662.79 MPa\n  Stress exits auto-judgment in the MVP because:\n    1. fixed-end stress concentration diverges under mesh refinement (not the section value Mc/I)\n    2. free-end point-load application is an artificial numerical singularity\n    3. stress error is not a meaningful convergence quantity in this configuration\n  -> N/A. Judge stress visually from out/stress_x.png / stress_y.png / stress_z.png.\n\nmesh convergence study : not performed in the MVP (out of scope).\n----------------------------------------------------------------\nVERDICT: PASS  (displacement within tolerance of the analytical solution)\n================================================================\n"
+      "report": "Numerical Verification Report (plan layer 7)\n================================================================\nproblem : cantilever_beam | static | linear elastic | L=100.0 h=10.0 b=10.0 mm\nfrd     : out/beam.frd\n\nreference selection (RAG retrieval -> deterministic applies() gate):\n  RAG retrieval (k=3) then applies() gate -> 'cantilever_tip_load_eb' at rank 1 (score 0.891)\n  MATCHED -> standard cantilever, free-end transverse point load  [id: cantilever_tip_load_eb]\n    applies_to : cantilever_beam; one end fully fixed; free-end transverse point load; linear elastic; small strain\n    scope_note : small strain, linear elastic, slender beam L/h >> 1 (Euler-Bernoulli; transverse shear deformation neglected)\n    source     : Euler-Bernoulli beam theory: delta = P L^3 / (3 E I), I = b h^3 / 12\n    note       : this configuration has L/h = 10.0\n\nDISPLACEMENT  (auto-judged):\n  delta_fem = 1.90583 mm   (max |U . load_dir| over the free-end LOAD face)\n  delta_ref = 1.90476 mm   (P L^3 / 3EI; P=1000 N, L=100 mm, E=210000 MPa, I=833.33 mm^4)\n  rel error = 0.0561 %    tolerance = 5.0000 %\n  -> PASS\n\nSTRESS  (NOT auto-judged -- recorded for human review):\n  max von Mises = 662.79 MPa\n  Stress exits auto-judgment in the MVP because:\n    1. fixed-end stress concentration diverges under mesh refinement (not the section value Mc/I)\n    2. free-end point-load application is an artificial numerical singularity\n    3. stress error is not a meaningful convergence quantity in this configuration\n  -> N/A. Judge stress visually from out/stress_x.png / stress_y.png / stress_z.png.\n\nmesh convergence study : not performed in the MVP (out of scope).\n\nVALIDITY OF THE LINEAR-ELASTIC MODEL  (checked beside the verdict, not part of it):\n  [EXCEEDED   ] stress below yield nominal bending stress at the clamp, M c / I = 600.0 MPa > fy = 355 MPa (1.69 x fy); STEEL taken as structural steel S355: fy = 355 MPa for t <= 40 mm (EN 1993-1-1:2005, Table 3.1)\n  [OK         ] small deflection   delta/L = 1.906/100 = 0.019 <= 0.1 (beyond it the linear theory of solver and reference no longer holds)\n----------------------------------------------------------------\nVERDICT: PASS  (displacement within tolerance of the analytical solution) -- BUT outside the linear-elastic model's validity (stress below yield): the solver and the reference agree under assumptions this load breaks\n================================================================\n"
     }
   ],
   "diagnosis": null,
@@ -372,5 +395,8 @@
     "n_elem": 1250,
     "n_nodes": 6696
   },
-  "workdir": "demo/cantilever_pass"
+  "workdir": "demo/cantilever_pass",
+  "warnings": [
+    "stress below yield: nominal bending stress at the clamp, M c / I = 600.0 MPa > fy = 355 MPa (1.69 x fy)"
+  ]
 }

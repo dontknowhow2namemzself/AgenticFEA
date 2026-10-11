@@ -190,6 +190,7 @@ A dark "control‑room" UI. A clarification chat resolves the request (asks for 
 
 - **Tip deflection vs analytical:** 1.9058 mm (FEM) vs 1.9048 mm (Euler–Bernoulli `PL³/3EI`) → **0.056 % error** (tolerance 5 %).
 - **Physics sanity:** force balance residual 0.000 %, moment balance 0.000 %, strain energy > 0, displacement downward — all pass.
+- **Validity of the linear‑elastic model, checked beside the verdict:** agreement with the reference shows only that the solver and the theory agree under the assumptions they share. Two deterministic checks say whether those assumptions hold: the stress stays below yield (each material carries a yield strength with its grade and source — steel is taken as S355, fy = 355 MPa, EN 1993‑1‑1 Table 3.1; a material without one is reported as not checked), and the beam's deflection stays small, δ/L ≤ 0.10, where the linear theory is within 1 % of the exact large‑deflection solution (4 % at 0.20, 12 % at 0.36). A result outside them keeps its verdict against the reference but is flagged ⚠ in amber.
 - **Diagnostics, validated on an induced failure:** a stubby beam (L/h = 2) makes the FEM deflection exceed beam theory by ~20 %; the agent correctly diagnoses *"Euler–Bernoulli invalid for a non‑slender beam — transverse shear, not a solver or mesh bug,"* with high confidence and a sound fix — it never executes anything.
 
 | annotated mesh + BCs | von Mises stress | deformed shape (×5) |

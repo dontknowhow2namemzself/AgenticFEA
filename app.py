@@ -70,6 +70,7 @@ hr.rule{ border:none; border-top:1px solid var(--line); margin:.5rem 0 1.1rem; }
   display:flex; align-items:center; justify-content:center; font-size:.95rem; color:var(--muted); z-index:1; }
 .node.pass{ border-color:var(--green); color:var(--green); }
 .node.fail{ border-color:var(--red); color:var(--red); }
+.node.warn{ border-color:var(--warn); color:var(--warn); }
 .node.run{ border-color:var(--amber); color:var(--amber); box-shadow:0 0 0 4px rgba(232,161,58,.12); }
 /* selected = keep the status colour (green/red); show "viewing" with a neutral
    focus halo only -- colour encodes status, the halo encodes selection. */
@@ -127,7 +128,7 @@ div[class*="st-key-stagebtn"] button:hover{ background:var(--bg); }
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-_SYM = {"pass": "✓", "fail": "!", "running": "●", "queued": ""}
+_SYM = {"pass": "✓", "fail": "!", "running": "●", "queued": "", "warning": "⚠"}
 
 
 def _img(path: str) -> str:
@@ -160,7 +161,7 @@ def demo_examples() -> list:
 def stage_bar_html(stage_list: list, sel=None) -> str:
     cells = []
     for i, s in enumerate(stage_list):
-        klass = {"pass": "pass", "fail": "fail", "running": "run"}.get(s["status"], "")
+        klass = {"pass": "pass", "fail": "fail", "running": "run", "warning": "warn"}.get(s["status"], "")
         if sel is not None and i == sel:
             klass += " sel"
         sym = _SYM.get(s["status"], str(i + 1))
@@ -386,7 +387,7 @@ sel = st.session_state.stage
 # button can be styled into the node itself -- no more detached selector row. The
 # per-node colour/halo is dynamic (status + selection), so we emit it here. Border
 # and glyph both read from currentColor, so one colour rule paints the whole ring.
-_NODE_C = {"pass": "var(--green)", "fail": "var(--red)", "running": "var(--amber)"}
+_NODE_C = {"pass": "var(--green)", "fail": "var(--red)", "running": "var(--amber)", "warning": "var(--warn)"}
 _css = []
 for i, s in enumerate(stages):
     c = _NODE_C.get(s["status"], "var(--muted)")
@@ -545,8 +546,12 @@ with right:
 m = run.get("meta", {})
 verdict = run.get("verdict", "—")
 vcol = {"PASS": "green", "FAIL": "red"}.get(verdict, "amber")
+# A verdict on agreement with the reference says nothing about whether the
+# linear-elastic model fits the result; say that beside it, in amber.
+validity = (f' <span class="amber">⚠ outside the linear-elastic model ('
+            + "; ".join(w.split(":")[0] for w in run["warnings"]) + ")</span>") if run.get("warnings") else ""
 st.markdown(
-    f'<div class="statusbar">verdict: <span class="{vcol}">{verdict}</span> &nbsp;&nbsp; '
+    f'<div class="statusbar">verdict: <span class="{vcol}">{verdict}</span>{validity} &nbsp;&nbsp; '
     f'solver: {m.get("solver","—")} &nbsp;&nbsp; units: {m.get("units","SI-mm")} &nbsp;&nbsp; '
     f'mesh: {m.get("n_elem","—")} elem / {m.get("n_nodes","—")} nodes &nbsp;&nbsp; '
     f'host: {m.get("host","—")}</div>', unsafe_allow_html=True)

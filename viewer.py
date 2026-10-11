@@ -291,15 +291,19 @@ def field_values(payload: dict, key: str) -> np.ndarray:
 
 
 def auto_warp_factor(payload: dict) -> float:
-    """Exaggeration that draws the peak displacement at 5% of the model diagonal.
+    """Exaggeration that draws the peak displacement at 5% of the model diagonal,
+    but never below 1.
 
-    The same rule as postprocess._auto_warp_factor: a fixed factor cannot serve
-    a 0.01 mm plate deflection and a 2 mm cantilever tip at once.
+    A fixed factor cannot serve a 0.01 mm plate stretch and a 2 mm cantilever
+    tip at once, so the factor follows the result: the 100 x 10 x 10 demo beam
+    (diagonal 101 mm, peak 1.91 mm) gets 0.05 x 101 / 1.91 = x2.64. A
+    deformation already larger than that is drawn at true scale (x1) rather
+    than shrunk -- shrinking it would hide exactly what is worth seeing.
     """
     xyz = payload["xyz"].astype(float)
     diag = float(np.linalg.norm(xyz.max(axis=0) - xyz.min(axis=0)))
     peak = float(np.linalg.norm(payload["U"].astype(float), axis=1).max())
-    return WARP_FRACTION * diag / peak if peak > 0 and diag > 0 else 1.0
+    return max(1.0, WARP_FRACTION * diag / peak) if peak > 0 and diag > 0 else 1.0
 
 
 def _b64(a) -> dict:
@@ -370,10 +374,13 @@ def _vertex_normals(pts: np.ndarray, tri: np.ndarray) -> np.ndarray:
     return vn / np.where(length > 0, length, 1.0)
 
 
-def _axis(title: str) -> dict:
-    return dict(title=dict(text=title, font=dict(color=MUTED, size=11)), color=MUTED,
+def _axis(title: str, span=None) -> dict:
+    axis = dict(title=dict(text=title, font=dict(color=MUTED, size=11)), color=MUTED,
                 gridcolor=GRID, zeroline=False, showbackground=False, showspikes=False,
                 tickfont=dict(size=10))
+    if span is not None:
+        axis.update(range=[float(span[0]), float(span[1])], autorange=False)
+    return axis
 
 
 def fringe(val: np.ndarray) -> dict:
@@ -529,8 +536,15 @@ def figure(payload: dict, height: int = 540):
     # True proportions, scaled so the longest side is 1. Plotly's own "data"
     # mode scales to a unit VOLUME instead, which stretches a 10:1 beam to 4.6
     # units and puts any fixed camera inside it.
-    extent = np.maximum(xyz.max(axis=0) - xyz.min(axis=0), 1e-12)
-    ratio = extent / extent.max()
+    # The axis ranges are fixed too, to a box holding BOTH shapes. Left to
+    # Plotly, a range follows the data shown while the box keeps the
+    # proportions set here: in the deformed shape the cantilever's tip goes
+    # 5 mm down, z spanned 15 mm in a box sized for 10, and the 10 x 10
+    # section was drawn 10 x 6.7.
+    both = np.vstack(list(shapes.values()))
+    pad = 0.03 * float((both.max(axis=0) - both.min(axis=0)).max())
+    lo, hi = both.min(axis=0) - pad, both.max(axis=0) + pad
+    ratio = (hi - lo) / (hi - lo).max()
     direction, up, parallel = VIEWS[opening]
     camera = dict(up=dict(zip("xyz", up)),
                   projection=dict(type="orthographic" if parallel else "perspective"))
@@ -541,12 +555,12 @@ def figure(payload: dict, height: int = 540):
         ratio = ratio * 1.4
         ratio[2] = 0.07                                  # a flat part has no depth
         camera["eye"] = dict(x=0.0, y=0.0, z=1.6)
-        zaxis = dict(_axis(""), visible=False)
+        zaxis = dict(_axis("", (lo[2], hi[2])), visible=False)
     else:
         # Looking along the length: the long axis recedes into depth, so the
         # part stays in frame however narrow the panel is.
         camera["eye"] = dict(zip("xyz", direction))
-        zaxis = _axis("z [mm]")
+        zaxis = _axis("z [mm]", (lo[2], hi[2]))
 
     fig = go.Figure([surface, wire, ext])
     fig.update_layout(
@@ -554,7 +568,7 @@ def figure(payload: dict, height: int = 540):
         paper_bgcolor=PANEL, plot_bgcolor=PANEL,
         font=dict(family='ui-monospace, "SF Mono", Menlo, monospace', color=TEXT),
         updatemenus=updatemenus,
-        scene=dict(xaxis=_axis("x [mm]"), yaxis=_axis("y [mm]"), zaxis=zaxis,
+        scene=dict(xaxis=_axis("x [mm]", (lo[0], hi[0])), yaxis=_axis("y [mm]", (lo[1], hi[1])), zaxis=zaxis,
                    domain=dict(x=[0, 1], y=[0.16, 1]),          # the bar lives below
                    aspectmode="manual", aspectratio=dict(x=ratio[0], y=ratio[1], z=ratio[2]),
                    bgcolor=PANEL, camera=camera,

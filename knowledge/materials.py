@@ -26,6 +26,15 @@ MATERIALS = {
     "MAGNESIUM":       {"E": 45000.0,  "nu": 0.35, "rho": 1.74e-9},
 }
 
+# Yield strength fy [MPa], used only to check that a linear-elastic result has
+# stayed elastic (verification.py). Each value says which grade it stands for
+# and where it comes from; a material without an entry is reported as "not
+# checked", never given a guessed value.
+YIELD = {
+    "STEEL": (355.0, "STEEL taken as structural steel S355: fy = 355 MPa for t <= 40 mm "
+                     "(EN 1993-1-1:2005, Table 3.1)"),
+}
+
 # Common aliases / spellings -> canonical key (the LLM usually normalizes names,
 # this is just a safety net).
 _ALIASES = {
@@ -57,3 +66,9 @@ def resolve_material(name: str):
 def material_names() -> list:
     """Sorted list of known material names (for prompts / error messages)."""
     return sorted(MATERIALS.keys())
+
+
+def yield_strength(name: str):
+    """(fy in MPa, its grade and source) for a library material, or None."""
+    canonical, _props = resolve_material(name)
+    return YIELD.get(canonical) if canonical else None
