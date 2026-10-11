@@ -20,6 +20,7 @@ import pprint
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import build_inp
@@ -73,6 +74,18 @@ def _diagnose(stage: str, params: dict, paths: RunPaths) -> dict:
 STAGE_ORDER = ["understand", "parameterize", "preprocess", "solve", "physics", "postprocess", "verify"]
 
 
+def run_title(params: dict) -> str:
+    """One line naming a run's problem, e.g. 'cantilever 100×10×10 mm · STEEL · 1000 N'."""
+    material = params["material"]["name"]
+    force = float(params["bc"]["loads"][0]["magnitude"])
+    if params["geometry"]["type"] == "plate_with_hole":
+        g = params["geometry"]["plate_with_hole"]
+        return (f"plate {g['a']:g}×{g['b']:g}×{g['t']:g} mm, hole r {g['r']:g} mm · "
+                f"{material} · {force:g} N")
+    g = params["geometry"]["cantilever_beam"]
+    return f"cantilever {g['L']:g}×{g['h']:g}×{g['b']:g} mm · {material} · {force:g} N"
+
+
 def host_label() -> str:
     """The machine this run is on, e.g. 'Apple M5 · 10 cores · 32 GB'.
 
@@ -102,7 +115,7 @@ def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
     """The Post-Process stage record, from postprocess.run_postprocess's summary.
 
     One place builds it, so a demo snapshot refreshed without re-running the
-    language layers (record_demo --refresh-renders) gets exactly the stage a
+    language layers (record_demo --refresh) gets exactly the stage a
     live run would.
     """
     if is_plate:
@@ -142,7 +155,7 @@ def postprocess_stage(post: dict, is_plate: bool, paths: RunPaths) -> dict:
 def verify_stage(params: dict, is_plate: bool, paths: RunPaths) -> tuple:
     """(the Verify stage record, the verdict, validity warnings), and the report file.
 
-    One place builds it, shared with record_demo --refresh-renders. The
+    One place builds it, shared with record_demo --refresh. The
     verdict judges agreement with the reference; the validity checks
     (verification._validity) say whether the linear-elastic model fits the
     result at all, and turn the stage amber -- not red -- when it does not.
@@ -173,6 +186,7 @@ def verify_stage(params: dict, is_plate: bool, paths: RunPaths) -> tuple:
         "tol_pct": round(judged.get("tol", default_tol) * 100, 2), "verdict": verdict,
         "kb_ref": kb, "provenance": judged.get("provenance")})
     validity = meta["validity"]
+    vdata["yield"] = next((c["basis"] for c in validity if "basis" in c), None)
     exceeded = [c for c in validity if c["status"] == "EXCEEDED"]
     warnings = [f'{c["name"]}: {c["detail"].split(";")[0]}' for c in exceeded]
     record = dict(id="verify", label="Verify",
@@ -201,7 +215,8 @@ def verify_stage(params: dict, is_plate: bool, paths: RunPaths) -> tuple:
 
 
 def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit=None,
-                 params: dict = None, paths: RunPaths = None) -> dict:
+                 params: dict = None, paths: RunPaths = None, user: str = "local",
+                 diagnose: bool = True) -> dict:
     """Run the pipeline and return the dashboard's run record.
 
     `params` skips layers 1-2 and runs the deterministic chain on a prepared
@@ -213,14 +228,26 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
     `paths` is the run's own directory. The dashboard passes a fresh one per run
     so that two runs at once cannot overwrite each other; left out, the run uses
     the shared out/ directory exactly as before.
+
+    `user` is who started the run (the dashboard lists each user's own runs).
+    Each stage records its `seconds`: the time since the previous stage.
+
+    `diagnose=False` leaves a failed run without a diagnosis, which is a
+    language-model call (record_demo keeps the one it recorded).
     """
     paths = (paths or RunPaths.default()).ensure()
     emit = emit or (lambda *a: None)   # emit(stage_id, phase) for live progress
     rec = {"run_id": run_id, "description": description, "status": "complete", "verdict": "—",
-           "stages": [], "diagnosis": None, "workdir": str(paths.root),
+           "stages": [], "diagnosis": None, "workdir": str(paths.root), "user": user,
+           "started": datetime.now(timezone.utc).isoformat(timespec="seconds"), "seconds": 0.0,
            "meta": {"solver": "CalculiX ccx · SPOOLES", "units": "SI-mm", "host": host_label()}}
+    t0 = clock = time.time()
 
     def stage(**kw):
+        nonlocal clock
+        now = time.time()
+        kw.setdefault("seconds", round(now - clock, 2))
+        clock, rec["seconds"] = now, round(now - t0, 2)
         kw.setdefault("actions", []); kw.setdefault("data", {})
         kw.setdefault("artifacts", []); kw.setdefault("report", "")
         rec["stages"].append(kw)
@@ -244,7 +271,7 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
                   artifacts=[{"kind": "code", "title": "params (prepared)",
                               "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False,
                                                                    width=78)}] if sid == "parameterize" else [])
-        return _run_deterministic_chain(params, rec, stage, warp, paths)
+        return _run_deterministic_chain(params, rec, stage, warp, paths, diagnose)
 
     # 1 -- task understanding
     t = time.time()
@@ -281,7 +308,7 @@ def run_pipeline(description: str, run_id: str = "run", warp: float = None, emit
           artifacts=[{"kind": "code", "title": "params.py (validated)",
                       "text": "PARAMS = " + pprint.pformat(params, sort_dicts=False, width=78)}])
 
-    return _run_deterministic_chain(params, rec, stage, warp, paths)
+    return _run_deterministic_chain(params, rec, stage, warp, paths, diagnose)
 
 
 def _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes) -> tuple:
@@ -327,10 +354,12 @@ def _preprocess_actions(params, msh, bc, inp, n_elem, n_nodes) -> tuple:
     return actions, data
 
 
-def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPaths) -> dict:
+def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPaths,
+                             diagnose: bool = True) -> dict:
     """Layers 3-7: pre-process -> solve -> physics -> post -> verify, all inside
     one run directory."""
     is_plate = params["geometry"]["type"] == "plate_with_hole"
+    rec["title"] = run_title(params)
 
     # 3 -- pre-processing (mesh + BC + inp)
     msh = mesh.build_mesh(params, paths=paths)
@@ -364,7 +393,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
           report=log)
     if not solved:
         rec["status"], rec["verdict"] = "failed", "FAIL"
-        rec["diagnosis"] = _diagnose("solve", params, paths)
+        rec["diagnosis"] = _diagnose("solve", params, paths) if diagnose else None
         return rec
 
     # 5 -- physics validation (fast-fail gate)
@@ -381,7 +410,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
           report=phys_text)
     if not ppass:
         rec["status"], rec["verdict"] = "failed", "FAIL"
-        rec["diagnosis"] = _diagnose("physics", params, paths)
+        rec["diagnosis"] = _diagnose("physics", params, paths) if diagnose else None
         return rec
 
     # 6 -- post-processing
@@ -396,7 +425,7 @@ def _run_deterministic_chain(params: dict, rec: dict, stage, warp, paths: RunPat
     stage(**verify)
     if verdict == "FAIL":
         rec["status"] = "failed"
-        rec["diagnosis"] = _diagnose("verification", params, paths)
+        rec["diagnosis"] = _diagnose("verification", params, paths) if diagnose else None
     else:
         rec["status"] = "complete"
     return rec
@@ -412,6 +441,7 @@ if __name__ == "__main__":
         "1000 N downward load at the free end."))
     ap.add_argument("--out", default=None, help="write the run-record JSON to this path (for the dashboard)")
     ap.add_argument("--run-id", default="live")
+    ap.add_argument("--user", default="local", help="who started the run (recorded; the dashboard lists by it)")
     ap.add_argument("--stream", action="store_true", help="print '@@ <stage> <phase>' progress markers")
     ap.add_argument("--case", default=None,
                     help="run a prepared case from params.CASES (skips the LLM layers), "
@@ -433,7 +463,7 @@ if __name__ == "__main__":
 
     emit = (lambda sid, ph: print(f"@@ {sid} {ph}", flush=True)) if args.stream else None
     r = run_pipeline(args.description, run_id=args.run_id, emit=emit, params=prepared,
-                     paths=run_paths)
+                     paths=run_paths, user=args.user)
     if args.out:
         Path(args.out).write_text(json.dumps(r, default=str))
         print(f"wrote {args.out}  (status={r['status']} verdict={r['verdict']})")

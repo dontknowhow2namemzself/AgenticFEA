@@ -142,6 +142,63 @@ def _viewer_figure(path: str, mtime: float):
     return viewer.figure(viewer.load_payload(path))
 
 
+def _when(rec: dict, name: str, tz: str | None) -> str:
+    """The run's start in the viewer's time zone. The record keeps it in UTC;
+    the directory name is the server's clock, which is UTC in a container."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        return datetime.fromisoformat(rec["started"]).astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d %H:%M")
+    except (KeyError, TypeError, ValueError, LookupError):   # older record, or no browser zone
+        return f"{name[0:4]}-{name[4:6]}-{name[6:8]} {name[9:11]}:{name[11:13]}"
+
+
+def past_runs(user: str, tz: str | None = None) -> list:
+    """This user's earlier live runs, newest first: [(run directory name, label)].
+
+    Each user sees only their own: on a shared dashboard one visitor's problems
+    are not another's to browse. Runs recorded before users were (no "user")
+    count as local.
+    """
+    from paths import RUNS_ROOT
+    out = []
+    for d in sorted(RUNS_ROOT.glob("*/live_run.json"), reverse=True):
+        try:
+            rec = json.loads(d.read_text())
+        except (OSError, ValueError):
+            continue
+        if rec.get("user", "local") != user:
+            continue
+        name = d.parent.name                                  # YYYYmmdd-HHMMSS-<hex>
+        when = _when(rec, name, tz)
+        what = rec.get("title") or rec.get("description", "")[:48]
+        flag = " ⚠" if rec.get("warnings") else ""
+        out.append((name, f"{when} · {what} · {rec.get('verdict', '—')}{flag}"))
+    return out
+
+
+def _open_past_run(user: str):
+    """Load the chosen earlier run as if it had just finished.
+
+    Only a run in this user's own listing is opened: the widget's value is not
+    trusted to be a run name. (Streamlit matches a selection by its label, so a
+    label that changed between reruns once came back here as the value.)
+    """
+    from paths import RUNS_ROOT
+    name = st.session_state.past_run
+    if name not in dict(past_runs(user)):
+        st.session_state.past_run = None
+        return
+    run = json.loads((RUNS_ROOT / name / "live_run.json").read_text())
+    st.session_state.update(run=run, stage=0, phase="done", completed=None, thinking=False,
+                            since=0, chat=[("user", run.get("description", ""))])
+
+
+def _new_problem():
+    st.session_state.update(run=None, chat=[], since=0, completed=None, phase="chatting",
+                            stage=0, past_run=None)
+
+
 def load_demo(name: str) -> dict:
     return json.loads((DEMO_DIR / name / "run.json").read_text())
 
@@ -175,7 +232,7 @@ def stage_bar_html(stage_list: list, sel=None) -> str:
 # ---------------- command console: a clarification chat (live) ----------------
 for _k, _v in {"run": None, "stage": 0, "chat": [], "since": 0,
                "phase": "chatting", "completed": None, "thinking": False,
-               "demo_chat": [], "demo_step": 0,
+               "demo_chat": [], "demo_step": 0, "past_run": None,
                "mode": "replay" if DEMO_MODE else "live"}.items():
     st.session_state.setdefault(_k, _v)
 REPLAY = st.session_state.mode == "replay"
@@ -185,7 +242,7 @@ def _switch_mode():
     """Each mode starts clean: a fresh chat, or the first recorded example."""
     for k, v in {"run": None, "stage": 0, "chat": [], "since": 0, "phase": "chatting",
                  "completed": None, "thinking": False, "pick": None,
-                 "demo_chat": [], "demo_step": 0}.items():
+                 "demo_chat": [], "demo_step": 0, "past_run": None}.items():
         st.session_state[k] = v
 
 
@@ -254,6 +311,17 @@ with st.container(border=True):
             st.markdown(f'<div class="query">&ldquo;{st.session_state.run["description"]}&rdquo;</div>',
                         unsafe_allow_html=True)
     else:
+        # Earlier runs of this user: reopen one, and see how many are kept.
+        # The options are the runs alone and the count is the placeholder: an
+        # option whose label changes (a count, after a new run) is no longer
+        # recognised by Streamlit, which then hands back the old label as a value.
+        _user = run_guard.user_of(st.context.headers)
+        _past = past_runs(_user, st.context.timezone)
+        if _past:
+            _labels = dict(_past)
+            st.selectbox("earlier runs", list(_labels), key="past_run", index=None,
+                         placeholder=f"earlier runs ({len(_past)}) …", format_func=lambda n: _labels.get(n, str(n)),
+                         on_change=_open_past_run, args=(_user,), label_visibility="collapsed")
         for _role, _text, *_ in st.session_state.chat:
             _bubble(_role, _text)
         if st.session_state.thinking:
@@ -270,14 +338,7 @@ with st.container(border=True):
                     st.session_state.thinking = True
                     st.rerun()
         elif st.session_state.phase == "done":
-            if st.button("↻ new problem"):
-                st.session_state.run = None
-                st.session_state.chat = []
-                st.session_state.since = 0
-                st.session_state.completed = None
-                st.session_state.phase = "chatting"
-                st.session_state.stage = 0
-                st.rerun()
+            st.button("↻ new problem", on_click=_new_problem)
 
 st.markdown('<hr class="rule">', unsafe_allow_html=True)
 
@@ -319,7 +380,7 @@ if not REPLAY and st.session_state.phase == "ready" and st.session_state.run is 
         live_json = run_paths.live_run_json
         proc = subprocess.Popen(
             [sys.executable, str(HERE / "pipeline_run.py"), "--stream",
-             "--workdir", str(run_paths.root), "--out", str(live_json),
+             "--workdir", str(run_paths.root), "--out", str(live_json), "--user", user,
              st.session_state.completed],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, cwd=str(HERE))
         buf = []
@@ -481,8 +542,14 @@ def render_artifact(a: dict):
                         f'<div class="s {s}">{_SYM.get(s, c["status"][0])}</div></div>', unsafe_allow_html=True)
     elif kind == "judge":
         v = a["verify"]
-        for k, val in [("δ analytical (PL³/3EI)", f'{v.get("delta_ref")} mm'),
-                       ("δ solver (FEM)", f'{v.get("delta_fem")} mm'),
+        # The compared quantity is the record's: tip deflection for a beam, Kt for a plate.
+        if str(v.get("quantity", "")).startswith("Kt"):
+            ref_k, fem_k, unit = "Kt reference", "Kt solver (FEM)", ""
+        else:
+            ref_k, fem_k, unit = "δ analytical (PL³/3EI)", "δ solver (FEM)", " mm"
+        num = lambda x: "—" if x is None else f"{x:.5g}{unit}"
+        for k, val in [(ref_k, num(v.get("ref", v.get("delta_ref")))),
+                       (fem_k, num(v.get("fem", v.get("delta_fem")))),
                        ("relative error", f'{v.get("error_pct")} %'),
                        ("threshold", f'≤ {v.get("tol_pct")} %')]:
             st.markdown(f'<div class="kv"><span class="k">{k}</span><span class="v">{val}</span></div>',
@@ -503,6 +570,13 @@ with right:
                 st.code(stage["report"], language="text")
         if not arts and not stage.get("report"):
             st.caption("no artifact for this stage")
+        if stage["id"] == "verify":
+            # The technical report (report.py): written by code from this run's
+            # record, and only when asked for -- the callable runs on the click.
+            import report
+            st.download_button("⤓ technical report (PDF)", data=lambda r=run: report.build(r),
+                               file_name=report.file_name(run), mime="application/pdf",
+                               on_click="ignore", key=f"report_{report.ident(run)}")
     # diagnostics on the failing stage
     if stage["status"] == "fail" and run.get("diagnosis"):
         d = run["diagnosis"]
