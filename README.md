@@ -94,7 +94,7 @@ These are what make the system trustworthy — and are the core of its **AI‑sa
 
 ## Tech stack
 
-- **LLM** — OpenRouter (OpenAI‑compatible API), model `openai/gpt-5.4`, **function/tool calling** with Pydantic‑generated JSON schemas; key via `.env`.
+- **LLM** — OpenRouter (OpenAI‑compatible API), model `openai/gpt-6-luna` (the cheapest that passes `eval_understanding.py`), **function/tool calling** with Pydantic‑generated JSON schemas; key via `.env`.
 - **Validation** — Pydantic v2.
 - **Geometry & mesh** — Gmsh (Python API), structured C3D20R hexahedra.
 - **Solver** — CalculiX `ccx`.

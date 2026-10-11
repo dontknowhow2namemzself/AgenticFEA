@@ -39,7 +39,10 @@ def load_env() -> None:
 load_env()
 
 OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-5.4")
+# The cheapest model that passes eval_understanding.py on every repeat (and
+# reproduces the recorded pipeline results end to end). Re-run that eval
+# before changing it.
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openai/gpt-6-luna")
 OPENROUTER_EMBED_MODEL = os.environ.get("OPENROUTER_EMBED_MODEL", "openai/text-embedding-3-small")
 
 
