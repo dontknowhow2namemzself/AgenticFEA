@@ -60,6 +60,10 @@ html,body,[class*="css"],.stMarkdown{ font-family:ui-monospace,"SF Mono",Menlo,m
 .bub.user{ background:#1b2533; border:1px solid #2a3a4f; }
 .bub.agent{ background:transparent; border:1px solid var(--line); }
 .bub.ok{ background:transparent; border:1px solid var(--green); }
+.sketch{ width:min(92%, 880px); background:#f6f8fa; border-radius:11px; padding:.6rem .8rem;
+  display:flex; gap:1rem; }
+.sketch img{ display:block; flex:1 1 0; min-width:0; height:auto; }
+@media (max-width: 640px){ .sketch{ width:100%; flex-direction:column; gap:.4rem; padding:.4rem; } }
 div[data-testid="stFormSubmitButton"]{ display:none; }
 hr.rule{ border:none; border-top:1px solid var(--line); margin:.5rem 0 1.1rem; }
 .stagebar{ display:flex; justify-content:space-between; margin:.2rem 0 .4rem; }
@@ -263,7 +267,7 @@ def _branch():
         chat.append(("agent", run_guard.BUDGET_MESSAGE if run_guard.budget_exhausted(exc)
                      else f"(could not reach the model: {exc.__class__.__name__})"))
         return
-    chat.append(("agent", step.message, {"asks": step.asks}))
+    chat.append(("agent", step.message, {"asks": step.asks, "figure": step.figure}))
     if step.kind in ("off_topic", "out_of_scope"):
         st.session_state.since = len(chat)        # the next message starts a new problem
     elif step.kind == "ready":
@@ -271,10 +275,42 @@ def _branch():
         st.session_state.phase = "ready"
 
 
-def _bubble(role: str, text: str):
+def _bubble(role: str, text: str, meta: dict = None):
     import html
     cls = "user" if role == "user" else ("ok" if text.startswith("✓") else "agent")
     st.markdown(f'<div class="brow {role}"><div class="bub {cls}">{html.escape(text)}</div></div>',
+                unsafe_allow_html=True)
+    if (meta or {}).get("figure") in FIGURES:
+        _figure(meta["figure"])
+
+
+# Sketches a reply can carry (task_understanding.Step.figure): its drawings,
+# each with the text that stands in for it where the image cannot be seen.
+# The drawings share one frame size and so one text size; side by side on a
+# wide screen, one above the other on a phone.
+FIGURES = {"loadcases": [
+    ("docs/loadcase_cantilever.svg",
+     "(a) Cantilever beam of length L and height h, clamped at one end, with a load of "
+     "resultant F on the free end face."),
+    ("docs/loadcase_plate.svg",
+     "(b) Plate a by b with a central hole of radius r, held by rollers (u_x = 0) on one "
+     "edge and pulled by a uniform tension of resultant F on the other."),
+]}
+
+
+@st.cache_data(show_spinner=False)
+def _figure_uri(path: str) -> str:
+    import base64
+    return "data:image/svg+xml;base64," + base64.b64encode((HERE / path).read_bytes()).decode()
+
+
+def _figure(name: str):
+    """A sketch below the reply, on a light card: the drawings are black on white.
+    Shown as an <img>, so nothing in the file can run as script in the page."""
+    import html
+    imgs = "".join(f'<img src="{_figure_uri(path)}" alt="{html.escape(alt)}">'
+                   for path, alt in FIGURES[name])
+    st.markdown(f'<div class="brow agent"><div class="sketch">{imgs}</div></div>',
                 unsafe_allow_html=True)
 
 
@@ -322,8 +358,8 @@ with st.container(border=True):
             st.selectbox("earlier runs", list(_labels), key="past_run", index=None,
                          placeholder=f"earlier runs ({len(_past)}) …", format_func=lambda n: _labels.get(n, str(n)),
                          on_change=_open_past_run, args=(_user,), label_visibility="collapsed")
-        for _role, _text, *_ in st.session_state.chat:
-            _bubble(_role, _text)
+        for _role, _text, *_meta in st.session_state.chat:
+            _bubble(_role, _text, _meta[0] if _meta else None)
         if st.session_state.thinking:
             with st.spinner("understanding…"):           # shown ABOVE the input, like agent replies
                 _branch()

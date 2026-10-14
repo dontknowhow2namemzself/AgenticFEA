@@ -188,6 +188,10 @@ questions in between as "[assistant]". Rules:
   If the conversation does not yet say which of the two it is ("a beam
   calculation", "can you help me with an FEA?"), leave geometry_type null and
   keep in_scope=true: a request that is only vague is NOT out of scope.
+- A question about what this pipeline can model or calculate ("What can you
+  do?", "What kind of problems can you calculate?") IS an FEA question:
+  is_fea_task=true, geometry_type null, in_scope=true. The reply lists both
+  geometries.
 - in_scope=false ONLY when the user describes a configuration the pipeline does
   not model; give a short scope_note.
   cantilever_beam supports exactly ONE end fully fixed (clamped) and a SINGLE
@@ -395,6 +399,10 @@ class Step:
     assumptions: list = field(default_factory=list)
     completed: Optional[str] = None
     assessment: Optional[TaskAssessment] = None
+    # A sketch the dashboard shows with the reply: "loadcases" (both supported
+    # load cases) when the user does not yet know what to give or asked for
+    # something outside them; "" otherwise. Chosen here by code, never by the model.
+    figure: str = ""
 
 
 SUPPORTED = ("I handle two geometries: a cantilever beam (one end fixed, a single transverse "
@@ -440,14 +448,14 @@ def understand(conversation, report: Optional[LLMReport] = None) -> Step:
             "Try e.g. 'a steel cantilever 100 mm, 10x10 mm, fixed one end, 1000 N down at the tip'."))
     if not report.in_scope:
         reason = report.scope_note or "unsupported configuration"
-        return Step("out_of_scope", reason=reason, message=(
+        return Step("out_of_scope", reason=reason, figure="loadcases", message=(
             f"That's beyond what I can model yet — {reason}. {SUPPORTED} Want to try one of those?"))
 
     values, conflicts, dropped = resolve(report, conversation)
     a = _assessment(report, values, conflicts)
     if a.geometry_type not in GEOMETRIES:
         return Step("ask", which_geometry_question(), reason="geometry type not stated",
-                    gaps=["geometry_type"], dropped=dropped, assessment=a)
+                    gaps=["geometry_type"], dropped=dropped, assessment=a, figure="loadcases")
 
     # A contradicted quantity is asked about as a contradiction, not as missing.
     stand_in = a.model_copy(update={QUANTITIES[q][0]: options[0][0] for q, options in conflicts.items()})
@@ -574,7 +582,7 @@ def consolidated_question(gaps: list, a: TaskAssessment) -> str:
     """One prompt listing every missing must-have (option C: ask once per round)."""
     lines = ["I still need the following before I can proceed:"]
     lines += [f"  - {_gap_line(g, a)}" for g in gaps]
-    lines.append("Please provide them in a single reply: ")
+    lines.append("Please give them in one reply.")
     return "\n".join(lines)
 
 
