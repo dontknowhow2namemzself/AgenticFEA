@@ -24,4 +24,11 @@ matplotlib==3.11.0
 # Retrieval (RAG) + dashboard
 chromadb==1.5.9           # vector store for reference / knowledge retrieval
 streamlit==1.58.0         # control-room dashboard (live + DEMO replay)
+# Streamlit 1.58 serves the page on Starlette + uvicorn, which it does not pin.
+# Starlette 1.8.0 breaks Streamlit 1.58's gzip middleware: every image request
+# fails ("http.response.body" without "http.response.start"), so no mesh or
+# result picture loads. Pinned to the versions it was verified with
+# (tests/test_media.py sends an image through that middleware).
+starlette==1.3.1
+uvicorn==0.49.0
 plotly==7.1.0             # interactive 3D view of the mesh and results in the dashboard
