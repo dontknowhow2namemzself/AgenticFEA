@@ -63,7 +63,8 @@ html,body,[class*="css"],.stMarkdown{ font-family:ui-monospace,"SF Mono",Menlo,m
 .sketch{ width:min(92%, 880px); background:#f6f8fa; border-radius:11px; padding:.6rem .8rem;
   display:flex; gap:1rem; }
 .sketch img{ display:block; flex:1 1 0; min-width:0; height:auto; }
-@media (max-width: 640px){ .sketch{ width:100%; flex-direction:column; gap:.4rem; padding:.4rem; } }
+.sketch.one{ width:min(46%, 440px); }
+@media (max-width: 640px){ .sketch, .sketch.one{ width:100%; flex-direction:column; gap:.4rem; padding:.4rem; } }
 div[data-testid="stFormSubmitButton"]{ display:none; }
 hr.rule{ border:none; border-top:1px solid var(--line); margin:.5rem 0 1.1rem; }
 .stagebar{ display:flex; justify-content:space-between; margin:.2rem 0 .4rem; }
@@ -267,7 +268,7 @@ def _branch():
         chat.append(("agent", run_guard.BUDGET_MESSAGE if run_guard.budget_exhausted(exc)
                      else f"(could not reach the model: {exc.__class__.__name__})"))
         return
-    chat.append(("agent", step.message, {"asks": step.asks, "figure": step.figure}))
+    chat.append(("agent", step.message, step.meta()))
     if step.kind in ("off_topic", "out_of_scope"):
         st.session_state.since = len(chat)        # the next message starts a new problem
     elif step.kind == "ready":
@@ -288,14 +289,13 @@ def _bubble(role: str, text: str, meta: dict = None):
 # each with the text that stands in for it where the image cannot be seen.
 # The drawings share one frame size and so one text size; side by side on a
 # wide screen, one above the other on a phone.
-FIGURES = {"loadcases": [
-    ("docs/loadcase_cantilever.svg",
-     "(a) Cantilever beam of length L and height h, clamped at one end, with a load of "
-     "resultant F on the free end face."),
-    ("docs/loadcase_plate.svg",
-     "(b) Plate a by b with a central hole of radius r, held by rollers (u_x = 0) on one "
-     "edge and pulled by a uniform tension of resultant F on the other."),
-]}
+_CANTILEVER = ("docs/loadcase_cantilever.svg",
+               "(a) Cantilever beam of length L and height h, clamped at one end, with a load "
+               "of resultant F on the free end face, along the height h.")
+_PLATE = ("docs/loadcase_plate.svg",
+          "(b) Plate a by b with a central hole of radius r, held by rollers (u_x = 0) on one "
+          "edge and pulled by a uniform tension of resultant F on the other.")
+FIGURES = {"loadcases": [_CANTILEVER, _PLATE], "cantilever": [_CANTILEVER]}
 
 
 @st.cache_data(show_spinner=False)
@@ -310,7 +310,8 @@ def _figure(name: str):
     import html
     imgs = "".join(f'<img src="{_figure_uri(path)}" alt="{html.escape(alt)}">'
                    for path, alt in FIGURES[name])
-    st.markdown(f'<div class="brow agent"><div class="sketch">{imgs}</div></div>',
+    one = " one" if len(FIGURES[name]) == 1 else ""
+    st.markdown(f'<div class="brow agent"><div class="sketch{one}">{imgs}</div></div>',
                 unsafe_allow_html=True)
 
 

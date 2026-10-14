@@ -9,7 +9,7 @@ understand() exactly as the dashboard does: a user turn, the agent's reply, the
 next scripted user turn, and so on, with a check after every turn.
 
 Usage:  python eval_understanding.py [--model openai/...] [--repeat 3] [--case word]
-Cost:   one LLM call per user turn (24 turns per repeat).
+Cost:   one LLM call per user turn (33 turns per repeat).
 """
 
 from __future__ import annotations
@@ -43,6 +43,14 @@ def ask_geometry_type():
     return check
 
 
+def ask_section(*values):
+    """The question which side of a section the load acts along, about exactly these values."""
+    def check(s):
+        ok = s.kind == "ask" and set(s.section) == set(values) and s.figure == "cantilever"
+        return ok, f"{s.kind} section={s.section} gaps={s.gaps}"
+    return check
+
+
 def kind(expected):
     def check(s):
         return s.kind == expected, f"{s.kind}: {s.reason[:70]}"
@@ -62,6 +70,8 @@ def ready(**expected):
 
 
 BEAM = "A steel cantilever beam 100 mm long, 10x10 mm square section, fixed at one end, with a 1000 N downward load at the free end."
+SECTION = "a steel cantilever, 500 mm long, 20x10 as cross section, fixed at one end, 300 N down at the free end"
+TALL = "A steel cantilever 200 mm long, 20 mm high and 10 mm wide, fixed at one end, with 1000 N"
 
 # (name, [(user turn, check after it), ...])
 CASES = [
@@ -125,6 +135,30 @@ CASES = [
          kind("impossible")),
         ("make the radius 20 mm", ready(a=100, b=100, r=20)),
     ]),
+    ("a section as numbers alone, then which side", [
+        (SECTION, ask_section(20, 10)),
+        ("the 20 mm side", ready(L=500, h=20, b=10, load_magnitude=300)),
+    ]),
+    ("a section as numbers alone, the other answer", [
+        (SECTION, ask_section(20, 10)),
+        ("10 mm", ready(L=500, h=10, b=20)),
+    ]),
+    ("a section with its sides named", [
+        ("A steel cantilever 500 mm long, 20 mm wide and 10 mm high, fixed at one end, 300 N down "
+         "at the free end", ready(h=10, b=20)),
+    ]),
+    ("a sideways load turns the beam", [
+        (TALL + " pushing sideways (horizontally) at the free end", ready(h=10, b=20)),
+    ]),
+    ("an upward load stays along h", [
+        (TALL + " pushing upward at the free end", ready(h=20, b=10)),
+    ]),
+    ("a load at an angle", [
+        (TALL + " at 45 degrees at the free end", kind("out_of_scope")),
+    ]),
+    ("a load along the beam", [
+        (TALL + " pulling the free end along the beam's length", kind("out_of_scope")),
+    ]),
     ("material not in the library", [
         ("an Inconel cantilever 100 mm long, 10x10 mm, fixed at one end, 1000 N down at the free end",
          ask_gaps("material")),
@@ -141,7 +175,7 @@ def run_case(name, turns, tu) -> tuple:
         notes.append(f"turn {k}: {'ok ' if ok else 'BAD'} {detail}")
         if not ok:
             return False, notes
-        conversation.append(("agent", step.message, {"asks": step.asks}))
+        conversation.append(("agent", step.message, step.meta()))
     return True, notes
 
 

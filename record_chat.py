@@ -50,11 +50,11 @@ def record(name: str, vague: str, details: str) -> None:
     (DEMO / name).mkdir(parents=True, exist_ok=True)   # do not depend on record_demo running first
     chat: list = [("user", vague)]
     step = tu.understand(chat)
-    chat.append(("agent", step.message, {"asks": step.asks}))
+    chat.append(("agent", step.message, step.meta()))
     if step.kind != "ready":
         chat.append(("user", details))
         step = tu.understand(chat)
-        chat.append(("agent", step.message, {"asks": step.asks}))
+        chat.append(("agent", step.message, step.meta()))
     (DEMO / name / "chat.json").write_text(
         json.dumps([{"role": e[0], "text": e[1]} for e in chat], indent=2, ensure_ascii=False))
     print(f"recorded {name:<16} {step.kind}  turns={len(chat)}")

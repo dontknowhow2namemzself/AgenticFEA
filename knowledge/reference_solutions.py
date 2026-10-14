@@ -73,6 +73,11 @@ def _cantilever_point_applies(params: dict) -> bool:
         return False
     if abs(float(load["dir"][0])) > 1e-9:           # transverse to the beam axis (no axial x)
         return False
+    # Along z, the height h: I = b h^3 / 12 is the bending of exactly that load.
+    # A sideways (y) or oblique load bends about another axis -- no reference,
+    # rather than a wrong one.
+    if abs(float(load["dir"][1])) > 1e-9:
+        return False
     if load.get("type", "point") != "point":        # a point/concentrated load
         return False
     return True

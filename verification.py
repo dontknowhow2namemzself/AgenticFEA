@@ -145,12 +145,14 @@ def _select_reference(params: dict, use_rag: bool = True) -> tuple:
 
 
 def _validity(params: dict, sigma: float, sigma_what: str, thickness: float,
-              delta: float = None, length: float = None) -> list:
+              delta: float = None, length: float = None, not_checked: str = "") -> list:
     """Is the linear-elastic, small-deflection model valid for this result?
 
     `thickness` is the governing thickness [mm] that picks the yield strength's
     band. Returns [{"name", "status" (OK | EXCEEDED | NOT CHECKED), "detail"}, ...];
     the yield check also carries its "basis": which fy, and where it comes from.
+    `not_checked` says why `sigma` is not this result's stress: the yield check
+    is then not made.
     """
     checks = []
     material = params["material"]["name"]
@@ -162,6 +164,9 @@ def _validity(params: dict, sigma: float, sigma_what: str, thickness: float,
     elif fy[0] is None:
         checks.append({"name": "stress below yield", "status": "NOT CHECKED",
                        "detail": fy[1], "basis": fy[1]})
+    elif not_checked:
+        checks.append({"name": "stress below yield", "status": "NOT CHECKED",
+                       "detail": not_checked, "basis": fy[1]})
     else:
         fy_value, source = fy
         ok = sigma <= fy_value
@@ -299,11 +304,17 @@ def _verify_beam(params: dict, paths: RunPaths, use_rag: bool = True) -> tuple:
     # The FE peak sits at the clamped corner, a singularity that grows with mesh
     # refinement, so it would trip the check for any load on a fine enough mesh.
     sigma_nominal = 6.0 * P * L / (b * h ** 2)
+    # That is the bending of a load along the height h (z) only; for a load with
+    # a sideways or axial part it is not this beam's stress, so no check at all.
+    along_h = abs(load_dir[0]) < 1e-9 and abs(load_dir[1]) < 1e-9
     meta = {"frd": str(paths.frd), "geom": "cantilever_beam", "L": L, "h": h, "b": b,
             "model_line": f"cantilever_beam | static | linear elastic | L={L} h={h} b={b} mm",
             # A solid rectangular bar's governing thickness is its smaller side.
             "validity": _validity(params, sigma_nominal, "nominal bending stress at the clamp, "
-                                  "M c / I", thickness=min(h, b), delta=delta_fem, length=L)}
+                                  "M c / I", thickness=min(h, b), delta=delta_fem, length=L,
+                                  not_checked="" if along_h else (
+                                      "the load is not along the height h, so M c / I with "
+                                      "I = b h^3 / 12 is not this beam's bending stress"))}
     overall_ok = disp["status"] != "FAIL"   # PASS or N/A -> chain ok; FAIL -> diagnostics
     return overall_ok, disp, stress, meta
 
