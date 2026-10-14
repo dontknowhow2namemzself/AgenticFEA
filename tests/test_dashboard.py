@@ -88,3 +88,17 @@ def test_reopen_an_earlier_run(monkeypatch, runs_root):
     assert not at.exception, at.exception
     assert at.session_state.phase == "done"
     click(at, "stagebtn6")                       # its Verify stage, with the report button
+
+
+def test_a_vague_request_shows_the_load_cases(monkeypatch, runs_root):
+    # Layer 1's model call is replaced by its answer to a vague request.
+    import task_understanding as tu
+    monkeypatch.setattr(tu, "assess", lambda conversation: tu.LLMReport(is_fea_task=True))
+    at = app(monkeypatch, demo_mode=False)
+    at.text_input[0].input("Can you help me with an FEA?")
+    at.button[0].click().run()
+    assert not at.exception, at.exception
+    page = "".join(m.value for m in at.markdown)
+    assert "Which problem is it?" in page
+    assert 'class="sketch"' in page
+    assert page.count("data:image/svg+xml;base64,") == 2      # the beam and the plate

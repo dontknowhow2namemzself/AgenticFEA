@@ -9,7 +9,7 @@ understand() exactly as the dashboard does: a user turn, the agent's reply, the
 next scripted user turn, and so on, with a check after every turn.
 
 Usage:  python eval_understanding.py [--model openai/...] [--repeat 3] [--case word]
-Cost:   one LLM call per user turn (22 turns per repeat).
+Cost:   one LLM call per user turn (24 turns per repeat).
 """
 
 from __future__ import annotations
@@ -77,6 +77,12 @@ CASES = [
     ]),
     ("very vague request", [
         ("can you help me with an FEA?", ask_geometry_type()),
+    ]),
+    ("capability question", [
+        ("What can you do?", ask_geometry_type()),
+    ]),
+    ("capability question, other words", [
+        ("What kind of problems can you calculate?", ask_geometry_type()),
     ]),
     ("complete cantilever in one message", [
         (BEAM, ready(L=100, h=10, b=10, material_name="STEEL", load_magnitude=1000)),
