@@ -102,3 +102,24 @@ def test_a_vague_request_shows_the_load_cases(monkeypatch, runs_root):
     assert "Which problem is it?" in page
     assert 'class="sketch"' in page
     assert page.count("data:image/svg+xml;base64,") == 2      # the beam and the plate
+
+
+def test_the_section_question_shows_the_beam_alone(monkeypatch, runs_root):
+    import task_understanding as tu
+    from task_understanding import LLMReport, Mention
+    said = "a steel cantilever, 500 mm long, 20x10 as cross section, fixed at one end, 300 N down at the free end"
+    report = LLMReport(is_fea_task=True, geometry_type="cantilever_beam", fixed_specified=True,
+                       load_specified=True, mentions=[
+                           Mention(quantity="L", turn=1, quote="500 mm long", value=500.0),
+                           Mention(quantity="h", turn=1, quote="20x10", value=20.0),
+                           Mention(quantity="b", turn=1, quote="20x10", value=10.0),
+                           Mention(quantity="load", turn=1, quote="300 N", value=300.0),
+                           Mention(quantity="material", turn=1, quote="steel", material="STEEL")])
+    monkeypatch.setattr(tu, "assess", lambda conversation: report)
+    at = app(monkeypatch, demo_mode=False)
+    at.text_input[0].input(said)
+    at.button[0].click().run()
+    assert not at.exception, at.exception
+    page = "".join(m.value for m in at.markdown)
+    assert "Which side does the load act along: 20 mm or 10 mm?" in page
+    assert 'class="sketch one"' in page and page.count("data:image/svg+xml;base64,") == 1

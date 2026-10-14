@@ -110,6 +110,9 @@ class TaskAssessment(BaseModel):
     load_magnitude: Optional[float] = None
     load_end: Optional[str] = None
     load_direction: Optional[str] = None
+    # Which way the cantilever's load acts, in the user's terms (see the prompt):
+    # height | width | axial | oblique. The pipeline loads along the height h.
+    load_axis: Optional[str] = None
     mesh_specified: bool = False
     mesh_elem_size: Optional[float] = None
     analysis_specified: bool = False
@@ -162,6 +165,7 @@ class LLMReport(BaseModel):
     load_specified: bool = False
     load_end: Optional[str] = None
     load_direction: Optional[str] = None
+    load_axis: Optional[Literal["height", "width", "axial", "oblique"]] = None
     mesh_specified: bool = False
     mesh_elem_size: Optional[float] = None
     analysis_specified: bool = False
@@ -206,7 +210,11 @@ questions in between as "[assistant]". Rules:
   mention per statement -- also when a quantity is stated again, and ESPECIALLY
   when it is stated again with a different value. Never choose between two
   values yourself and never drop one; the pipeline asks the user.
-    L, h, b      beam length, height (the load direction), width, in mm
+    L, h, b      beam length, height, width, in mm. The height h is the side of
+                 the section the load acts along. A section given as two numbers
+                 without saying which is the height ("20x10", "20 by 10 mm")
+                 gives h and b with that same quote, in the order written: the
+                 pipeline then asks the user which side the load acts along.
     plate_a      plate length along the pull direction, mm
     plate_b      plate width across it, mm
     plate_t      plate thickness, mm
@@ -224,9 +232,18 @@ questions in between as "[assistant]". Rules:
   Only the USER's words count. Never take a value from an [assistant] turn --
   its examples ("e.g. 100 x 10 x 10") are not the user's.
   Read an answer in the light of the question it answers: after the assistant
-  asks for "length L, height h, width b", the reply "200 x 20 x 10" means
-  L=200, h=20, b=10.
+  asks for "length L, height h ... and width b", the reply "200 x 20 x 10" means
+  L=200, h=20, b=10. After it asks which side of a section the load acts along,
+  the reply names h: ALWAYS report it as a mention of h in that reply's turn,
+  with the user's words as the quote ("the 10 mm side" -> h = 10). A reply that
+  names the width instead ("20 is the width") is a mention of b.
 
+- load_axis, for the cantilever: which way the load acts, in the user's terms.
+    "height"   down, up or vertical, or along the side the user calls the
+               height; also when no direction is given
+    "width"    sideways / horizontal, or along the side the user calls the width
+    "axial"    along the beam's length (pulling or pushing it lengthwise)
+    "oblique"  at an angle, or in more than one direction at once
 - Plate hole position: leave hole_xc / hole_yc null when the hole is centred /
   "in the middle", or when its position is not mentioned at all. Only fill
   them for a genuinely off-centre position, measured from the LOWER-LEFT corner.
@@ -320,6 +337,39 @@ def _canonical_material(name: str) -> str:
     return canonical or name.strip().upper()
 
 
+def _same(quantity: str, a, b) -> bool:
+    return a == b if quantity == "material" else math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
+
+def _named_side(found: list, turn: int, pair) -> dict:
+    """h and b from the reply to "which side does the load act along": the reply
+    names one of the section's two values as h (or as b), and the other value
+    is the other side -- decided here, not read again by the model."""
+    for q, other in (("h", "b"), ("b", "h")):
+        hits = _distinct(q, [(v, quote) for qq, v, quote, t in found
+                             if qq == q and t == turn and any(_same(q, v, p) for p in pair)])
+        if len(hits) == 1:
+            value, quote = hits[0]
+            rest = pair[1] if _same(q, value, pair[0]) else pair[0]
+            return {q: (value, quote, turn, "answered"), other: (rest, quote, turn, "answered")}
+    return {}
+
+
+def _bare_side(reply: str, pair) -> dict:
+    """The reply to "which side does the load act along: 20 mm or 10 mm?" when the
+    model reported nothing for it: a reply holding just one of the two numbers
+    ("10", "10 mm", "the 10 mm side") names that side as h. One that speaks of
+    the width, or holds other numbers, is left to the model."""
+    if re.search(r"wid|wide|across|breit", reply, re.IGNORECASE):
+        return {}
+    numbers = {float(n) for n in re.findall(r"\d+(?:\.\d+)?", reply)}
+    named = [v for v in pair if any(_same("h", v, n) for n in numbers)]
+    if len(named) != 1 or len(numbers) != 1:
+        return {}
+    rest = pair[1] if _same("h", named[0], pair[0]) else pair[0]
+    return {"h": (named[0], reply, 0, "answered"), "b": (rest, reply, 0, "answered")}
+
+
 def _distinct(quantity: str, found: list) -> list:
     """[(value, quote), ...] with one entry per different value, first quote kept."""
     out = []
@@ -332,14 +382,18 @@ def _distinct(quantity: str, found: list) -> list:
 
 
 def resolve(report: LLMReport, conversation) -> tuple:
-    """(values, conflicts, dropped) from the report's mentions, decided by code.
+    """(values, conflicts, dropped, sources) from the report's mentions, decided by code.
 
     values    : quantity -> the one value the user gave
     conflicts : quantity -> [(value, quote), ...] when the user gave several
     dropped   : mentions whose quote is not in the turn they name -- not the
                 user's words, so not the user's value
+    sources   : quantity -> (quote, turn, how) of each value; how is "stated",
+                or "answered" when the reply to a section question decided it
     A reply to a question that asked to settle a quantity (meta "asks")
-    settles it: earlier statements of that quantity no longer count.
+    settles it: earlier statements of that quantity no longer count. A reply
+    to "which side of the section does the load act along" (meta "section":
+    the two values) settles h and b together (_named_side).
     """
     users = _user_turns(conversation)
     found, dropped = [], []          # (quantity, value, quote, turn)
@@ -350,30 +404,35 @@ def resolve(report: LLMReport, conversation) -> tuple:
               and _squash(m.quote) in _squash(users[m.turn - 1]) and value is not None)
         (found if ok else dropped).append((m.quantity, value, m.quote, m.turn))
 
-    settled, pending, turn = {}, [], 0
+    settled, pending, pair, turn = {}, [], None, 0
     for entry in conversation:
         if entry[0] == "user":
             turn += 1
             for q in pending:
                 answer = _distinct(q, [(v, quote) for qq, v, quote, t in found if qq == q and t == turn])
                 if len(answer) == 1:
-                    settled[q] = (answer[0][0], answer[0][1], turn)
-            pending = []
+                    settled[q] = (answer[0][0], answer[0][1], turn, "stated")
+            if pair:
+                side = _named_side(found, turn, pair) or _bare_side(users[turn - 1], pair)
+                settled.update({q: (v, quote, turn, how) for q, (v, quote, _t, how) in side.items()})
+            pending, pair = [], None
         else:
             pending = list(_meta(entry).get("asks", []))
+            pair = _meta(entry).get("section")
 
-    values, conflicts = {}, {}
+    values, conflicts, sources = {}, {}, {}
     for q in QUANTITIES:
-        stated = [(v, quote, t) for qq, v, quote, t in found if qq == q]
+        stated = [(v, quote, t, "stated") for qq, v, quote, t in found if qq == q]
         if q in settled:
-            v0, quote0, t0 = settled[q]
-            stated = [(v0, quote0, t0)] + [s for s in stated if s[2] > t0]
+            stated = [settled[q]] + [s for s in stated if s[2] > settled[q][2]]
         options = _distinct(q, stated)
         if len(options) == 1:
             values[q] = options[0][0]
+            _v, quote, t, how = next(s for s in stated if _same(q, s[0], values[q]))
+            sources[q] = (quote, t, how)
         elif len(options) > 1:
             conflicts[q] = options
-    return values, conflicts, dropped
+    return values, conflicts, dropped, sources
 
 
 def _assessment(report: LLMReport, values: dict, conflicts: dict) -> TaskAssessment:
@@ -401,8 +460,17 @@ class Step:
     assessment: Optional[TaskAssessment] = None
     # A sketch the dashboard shows with the reply: "loadcases" (both supported
     # load cases) when the user does not yet know what to give or asked for
-    # something outside them; "" otherwise. Chosen here by code, never by the model.
+    # something outside them, "cantilever" with the question about a section's
+    # sides; "" otherwise. Chosen here by code, never by the model.
     figure: str = ""
+    section: tuple = ()                # the two values of a section asked about
+
+    def meta(self) -> dict:
+        """What the reply records in the conversation for the next turn to use."""
+        meta = {"asks": self.asks, "figure": self.figure}
+        if self.section:
+            meta["section"] = list(self.section)
+        return meta
 
 
 SUPPORTED = ("I handle two geometries: a cantilever beam (one end fixed, a single transverse "
@@ -428,6 +496,74 @@ def conflict_question(conflicts: dict, gaps: list, a: TaskAssessment) -> str:
     return "\n".join(lines)
 
 
+# How our own question orders a beam's sizes. A reply to it gives them in this
+# order, so a section written as numbers alone is not ambiguous there.
+SECTION_ORDER = "length L, height h"
+
+# A cantilever load the pipeline does not model, and how a reply names it.
+UNSUPPORTED_LOADS = {"axial": "a load along the beam's length",
+                     "oblique": "a load at an angle to the section's sides"}
+
+
+def _answers_section_order(conversation, turn: int) -> bool:
+    """Is user turn `turn` the reply to our question that names the order L, h, b?"""
+    n, before = 0, ""
+    for entry in conversation:
+        if entry[0] == "user":
+            n += 1
+            if n == turn:
+                return SECTION_ORDER in before
+            before = ""
+        else:
+            before = entry[1]
+    return False
+
+
+def _unlabelled_section(values: dict, sources: dict, conversation):
+    """(quote, (h, b)) when the beam's section came as numbers alone ("20x10"):
+    h and b from one quote with different values, not in reply to our ordered
+    question and not settled by the user since. Which number is h was then
+    only the model's reading of the order, so the user is asked."""
+    if "h" not in values or "b" not in values:
+        return None
+    (quote_h, turn_h, how_h), (quote_b, turn_b, how_b) = sources["h"], sources["b"]
+    if "answered" in (how_h, how_b) or turn_h != turn_b or _squash(quote_h) != _squash(quote_b):
+        return None
+    if _same("h", values["h"], values["b"]) or _answers_section_order(conversation, turn_h):
+        return None          # a square section is the same beam either way
+    return quote_h, (values["h"], values["b"])
+
+
+def section_question(quote: str, pair, gaps: list, a: TaskAssessment, again: bool = False) -> str:
+    if again:
+        lines = [f"I could not tell from that which side of the section the load acts along. "
+                 f"Please answer with one of the two: {pair[0]:g} mm or {pair[1]:g} mm."]
+    else:
+        lines = [f"You gave the section as '{quote}' without saying which side is which. "
+                 f"Which side does the load act along: {pair[0]:g} mm or {pair[1]:g} mm? "
+                 "(That side is the height h.)"]
+    if gaps:
+        lines += ["", consolidated_question(gaps, a)]
+    return "\n".join(lines)
+
+
+def _load_along_h(a: TaskAssessment, sources: dict) -> tuple:
+    """(assessment, disclosure). The pipeline loads a cantilever along its
+    height h, pointing down (-z). A load the user put sideways, along the side
+    they called the width, is the same beam turned 90 degrees: h and b swap and
+    the load points down. Said in "assumptions applied", never done silently."""
+    if a.geometry_type != "cantilever_beam" or a.load_axis != "width":
+        return a, ""
+    if any(sources.get(q, ("", 0, ""))[2] == "answered" for q in ("h", "b")):
+        # h is already the side the user named as the one the load acts along.
+        return a.model_copy(update={"load_direction": "down (-z)"}), (
+            "load direction = down (-z), along the height h [the side named for the load]")
+    turned = a.model_copy(update={"h": a.b, "b": a.h, "load_direction": "down (-z)"})
+    return turned, (f"load sideways, along the {a.b:g} mm side: the same beam turned 90 degrees, "
+                    f"height h = {a.b:g} mm, width b = {a.h:g} mm, load down (-z) "
+                    "[the pipeline loads along h]")
+
+
 def which_geometry_question() -> str:
     return ("Which problem is it? I can model two:\n"
             "  - a cantilever beam: one end clamped, one point load at the free end\n"
@@ -451,7 +587,12 @@ def understand(conversation, report: Optional[LLMReport] = None) -> Step:
         return Step("out_of_scope", reason=reason, figure="loadcases", message=(
             f"That's beyond what I can model yet — {reason}. {SUPPORTED} Want to try one of those?"))
 
-    values, conflicts, dropped = resolve(report, conversation)
+    if report.geometry_type == "cantilever_beam" and report.load_axis in UNSUPPORTED_LOADS:
+        reason = UNSUPPORTED_LOADS[report.load_axis]
+        return Step("out_of_scope", reason=reason, figure="loadcases", message=(
+            f"That's beyond what I can model yet — {reason}. {SUPPORTED} Want to try one of those?"))
+
+    values, conflicts, dropped, sources = resolve(report, conversation)
     a = _assessment(report, values, conflicts)
     if a.geometry_type not in GEOMETRIES:
         return Step("ask", which_geometry_question(), reason="geometry type not stated",
@@ -465,6 +606,15 @@ def understand(conversation, report: Optional[LLMReport] = None) -> Step:
                     reason="contradictory values: " + ", ".join(conflicts),
                     asks=list(conflicts), gaps=gaps, conflicts=conflicts, dropped=dropped,
                     assessment=a)
+    section = _unlabelled_section(values, sources, conversation) \
+        if a.geometry_type == "cantilever_beam" else None
+    if section:
+        quote, pair = section
+        last = next((_meta(e) for e in reversed(conversation) if e[0] != "user"), {})
+        again = sorted(last.get("section", [])) == sorted(pair)
+        return Step("ask", section_question(quote, pair, gaps, a, again), reason="section sides not named",
+                    asks=["h", "b"], section=pair, gaps=gaps, dropped=dropped, assessment=a,
+                    figure="cantilever")
     impossible = geometry_impossible(a)
     if impossible:
         # Reported, never repaired. Adjusting the user's numbers to make the
@@ -477,7 +627,10 @@ def understand(conversation, report: Optional[LLMReport] = None) -> Step:
     if gaps:
         return Step("ask", consolidated_question(gaps, a), reason="missing: " + ", ".join(gaps),
                     gaps=gaps, dropped=dropped, assessment=a)
+    a, turned = _load_along_h(a, sources)
     resolved, assumptions = apply_defaults(a)
+    if turned:
+        assumptions.insert(0, turned)
     note = "; ".join(assumptions[:2]) + ("…" if len(assumptions) > 2 else "")
     return Step("ready", f"✓ Understood — assumed {note}. Running the pipeline…",
                 resolved=resolved, assumptions=assumptions, dropped=dropped,
@@ -562,7 +715,8 @@ def _gap_line(gap: str, a: TaskAssessment) -> str:
         if is_plate(a):
             return ("geometry: plate length a and width b, and hole radius r, in mm "
                     "(e.g. 200 x 100 plate with a 20 mm radius hole)")
-        return "geometry: length L, height h, width b in mm (e.g. 100 x 10 x 10)"
+        return (f"geometry: {SECTION_ORDER} (the side the load acts along) and width b, in mm "
+                "(e.g. L x h x b = 100 x 20 x 10)")
     if gap == "material":
         known = ", ".join(material_names())
         if a.material_specified and a.material_name:
